@@ -51,17 +51,14 @@ def run_single_projection(args):
         return False, error_msg[:100], timestamp_ms
 
 
-def process_single_scene(scene_id, config, num_processes, threads_per_frame, project_root):
-    """处理单个场景"""
+def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_per_frame, project_root):
+    """处理单个场景的单个车辆ID"""
     print(f"\n{'='*80}")
-    print(f"开始处理场景: {scene_id}")
+    print(f"开始处理场景: {scene_id}, 车辆ID: {vehicle_id}")
     print(f"{'='*80}")
 
-    # 获取车辆ID
-    vehicle_id = config.get('vehicle_id', 45)
-
-    # 为当前场景创建独立的输出目录
-    output_root = Path(project_root) / scene_id
+    # 为当前场景+车辆ID创建独立的输出目录
+    output_root = Path(project_root) / f"{scene_id}_id{vehicle_id}"
     print(f"📂 输出目录: {output_root}")
     print(f"🚗 目标车辆ID: {vehicle_id}")
 
@@ -225,28 +222,27 @@ def main():
     output_root = Path(__file__).resolve().parent
 
     # 确认
+    scene_vehicle_ids = config.get('scene_vehicle_ids', {})
     print(f"\n{'='*80}")
     print(f"📋 处理计划:")
     print(f"   场景数量: {len(config['scene_ids'])}")
-    print(f"   场景列表: {', '.join(config['scene_ids'])}")
+    for sid in config['scene_ids']:
+        vids = scene_vehicle_ids.get(sid, [45])
+        print(f"   场景 {sid} → 车辆ID: {vids} → 输出: {', '.join(f'{sid}_id{v}' for v in vids)}")
     print(f"   批次模式: {config['batch_mode']}")
-    print(f"   目标车辆ID: {config.get('vehicle_id', 45)}")
     print(f"   并行配置: {num_processes}进程 × {threads_per_frame}线程")
-    print(f"   输出目录: {output_root}/{{场景ID}}/")
+    print(f"   输出目录: {output_root}/{{场景ID}}_id{{车辆ID}}/")
     print(f"{'='*80}")
 
-    # confirm = input("\n开始处理? (y/n): ").strip().lower()
-    # if confirm != 'y':
-    #     print("❌ 取消处理")
-    #     sys.exit(0)
-
-    # 处理每个场景
+    # 处理每个场景的每个车辆ID
     overall_start = time.time()
 
     for scene_id in config['scene_ids']:
-        process_single_scene(
-            scene_id, config, num_processes, threads_per_frame, output_root
-        )
+        vehicle_ids = scene_vehicle_ids.get(scene_id, [45])
+        for vehicle_id in vehicle_ids:
+            process_single_scene(
+                scene_id, vehicle_id, config, num_processes, threads_per_frame, output_root
+            )
 
     overall_elapsed = time.time() - overall_start
 
@@ -256,7 +252,7 @@ def main():
     print(f"{'='*80}")
     print(f"场景数量: {len(config['scene_ids'])}")
     print(f"总耗时: {overall_elapsed/60:.1f} 分钟")
-    print(f"输出目录: {output_root}/{{场景ID}}/")
+    print(f"输出目录: {output_root}/")
     print(f"{'='*80}\n")
 
 

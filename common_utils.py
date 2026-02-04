@@ -546,9 +546,9 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
         config = load_batch_config()
         if config:
             print("\n✓ 使用已保存的配置:")
-            print(f"   场景: {', '.join(config['scene_ids'])}")
-
-            print(f"   车辆ID: {config.get('vehicle_id', 45)}")
+            scene_vehicle_ids = config.get('scene_vehicle_ids', {})
+            for sid, vids in scene_vehicle_ids.items():
+                print(f"   场景 {sid}: 车辆ID {vids}")
 
             print(f"   批次: {config['batch_mode']}")
             print(f"{'='*60}\n")
@@ -560,47 +560,60 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
     print("🚀 投影处理系统 - 统一交互界面")
     print("="*60)
 
-    # 1. 输入场景ID（支持多个）
-    print("\n📁 步骤 1/3: 输入场景ID")
-    print("   提示：可以输入多个场景ID，用空格分隔")
-    print("   示例：002 004 005")
-    scene_input = input("   请输入场景ID: ").strip()
-    scene_ids = scene_input.split()
+    # 1. 逐个输入场景及其车辆ID
+    print("\n📁 步骤 1/2: 逐个输入场景和目标车辆ID")
+    print("   说明：每次输入一个场景ID和该场景需要投影的车辆ID")
+    print("   直接按 Enter（不输入场景ID）结束输入")
 
-    if not scene_ids:
-        print("❌ 未输入场景ID")
-        return None
-
-    print(f"   ✓ 选择了 {len(scene_ids)} 个场景: {', '.join(scene_ids)}")
-
-    # 验证场景路径
+    scene_vehicle_ids = {}  # {scene_id: [vehicle_id1, vehicle_id2, ...]}
     valid_scenes = []
-    for sid in scene_ids:
-        paths = get_scene_paths(sid)
-        if paths and validate_scene_paths(paths):
-            valid_scenes.append(sid)
-            print(f"   ✓ 场景 {sid}: {paths['scene_name']}")
+
+    while True:
+        print(f"\n   --- 第 {len(valid_scenes) + 1} 个场景 ---")
+        scene_input = input("   请输入场景ID（直接Enter结束）: ").strip()
+
+        if not scene_input:
+            if not valid_scenes:
+                print("   ❌ 至少需要输入一个场景")
+                continue
+            break
+
+        # 验证场景路径
+        paths = get_scene_paths(scene_input)
+        if not paths or not validate_scene_paths(paths):
+            print(f"   ✗ 场景 {scene_input}: 路径无效，请重新输入")
+            continue
+
+        print(f"   ✓ 场景 {scene_input}: {paths['scene_name']}")
+
+        # 输入该场景的车辆ID（支持多个）
+        print(f"   🚗 输入该场景需要投影的车辆ID（空格分隔，可输入多个）")
+        print(f"   示例：45 67 89")
+        vehicle_id_input = input(f"   请输入车辆ID [默认45]: ").strip()
+
+        if not vehicle_id_input:
+            vehicle_ids = [45]
         else:
-            print(f"   ✗ 场景 {sid}: 路径无效，跳过")
+            vehicle_ids = []
+            for vid_str in vehicle_id_input.split():
+                try:
+                    vehicle_ids.append(int(vid_str))
+                except ValueError:
+                    print(f"   ⚠️  忽略无效输入: {vid_str}")
+            if not vehicle_ids:
+                print(f"   ⚠️  无有效ID，使用默认值 45")
+                vehicle_ids = [45]
 
-    if not valid_scenes:
-        print("❌ 没有有效的场景")
-        return None
+        valid_scenes.append(scene_input)
+        scene_vehicle_ids[scene_input] = vehicle_ids
+        print(f"   ✓ 场景 {scene_input} → 车辆ID: {vehicle_ids}")
 
-    # 2. 输入目标车辆ID（从路侧标注中查找）
-    print("\n🚗 步骤 2/3: 输入目标车辆ID")
-    print("   说明：将从路侧动态标注文件中读取该ID车辆的位姿，计算world2lidar变换")
-    print("   提示：可以输入任意存在于标注文件中的车辆ID")
-    vehicle_id_input = input("   请输入车辆ID [默认45]: ").strip()
-    try:
-        vehicle_id = int(vehicle_id_input) if vehicle_id_input else 45
-    except ValueError:
-        print(f"   ⚠️  无效输入，使用默认值 45")
-        vehicle_id = 45
-    print(f"   ✓ 目标车辆ID: {vehicle_id}")
+    print(f"\n   ✓ 共 {len(valid_scenes)} 个场景:")
+    for sid in valid_scenes:
+        print(f"      场景 {sid} → 车辆ID: {scene_vehicle_ids[sid]}")
 
-    # 3. 选择批次模式
-    print("\n📊 步骤 3/3: 选择批次模式")
+    # 2. 选择批次模式
+    print("\n📊 步骤 2/2: 选择批次模式")
     print("   选项：")
     print("     - all          : 处理所有文件（默认）")
     print("     - N            : 处理前N个（例如：10）")
@@ -614,7 +627,7 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
     # 返回配置（不包含并行配置，由各项目单独处理）
     config = {
         'scene_ids': valid_scenes,
-        'vehicle_id': vehicle_id,
+        'scene_vehicle_ids': scene_vehicle_ids,
         'batch_mode': batch_mode
     }
 

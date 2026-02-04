@@ -50,22 +50,19 @@ def run_single_projection(args):
         return False, error_msg[:100], timestamp_ms
 
 
-def process_single_scene(scene_id, config, num_processes, threads_per_frame,
+def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_per_frame,
                         project_root, ego_vehicle_mapping):
-    """处理单个场景"""
+    """处理单个场景的单个车辆ID"""
     print(f"\n{'='*80}")
-    print(f"开始处理场景: {scene_id}")
+    print(f"开始处理场景: {scene_id}, 车辆ID: {vehicle_id}")
     print(f"{'='*80}")
 
     # 获取当前场景的自车ID
     ego_vehicle_id = ego_vehicle_mapping.get(scene_id, 45)
     print(f"🚗 当前场景自车ID: {ego_vehicle_id}")
 
-    # 获取车辆ID（用于计算world2lidar变换）
-    vehicle_id = config.get('vehicle_id', 45)
-
-    # 为当前场景创建独立的输出目录
-    output_root = Path(project_root) / scene_id
+    # 为当前场景+车辆ID创建独立的输出目录
+    output_root = Path(project_root) / f"{scene_id}_id{vehicle_id}"
     print(f"📂 输出目录: {output_root}")
     print(f"🚗 目标车辆ID: {vehicle_id}")
 
@@ -226,37 +223,37 @@ def main():
     output_root = Path(__file__).resolve().parent
 
     # 确认（批量模式自动确认）
+    scene_vehicle_ids = config.get('scene_vehicle_ids', {})
     print(f"\n{'='*80}")
     print(f"📋 处理计划:")
     print(f"   场景数量: {len(config['scene_ids'])}")
-    print(f"   场景列表: {', '.join(config['scene_ids'])}")
+    for sid in config['scene_ids']:
+        vids = scene_vehicle_ids.get(sid, [45])
+        print(f"   场景 {sid} → 车辆ID: {vids} → 输出: {', '.join(f'{sid}_id{v}' for v in vids)}")
+        print(f"      自车ID（排除）: {ego_vehicle_mapping.get(sid, 45)}")
     print(f"   批次模式: {config['batch_mode']}")
-    print(f"   目标车辆ID: {config.get('vehicle_id', 45)}")
-    print(f"   自车ID配置:")
-    for scene_id in config['scene_ids']:
-        print(f"      场景 {scene_id}: 自车ID = {ego_vehicle_mapping[scene_id]}")
     print(f"   并行配置: {num_processes}进程 × {threads_per_frame}线程")
-    print(f"   输出目录: {output_root}/{{场景ID}}/")
+    print(f"   输出目录: {output_root}/{{场景ID}}_id{{车辆ID}}/")
     print(f"{'='*80}")
 
     if not batch_mode:
-        # 单独运行模式：需要手动确认
         confirm = input("\n开始处理? (y/n): ").strip().lower()
         if confirm != 'y':
             print("❌ 取消处理")
             sys.exit(0)
     else:
-        # 批量模式：自动开始
         print("\n✓ 批量模式，自动开始处理...")
 
-    # 处理每个场景
+    # 处理每个场景的每个车辆ID
     overall_start = time.time()
 
     for scene_id in config['scene_ids']:
-        process_single_scene(
-            scene_id, config, num_processes, threads_per_frame,
-            output_root, ego_vehicle_mapping
-        )
+        vehicle_ids = scene_vehicle_ids.get(scene_id, [45])
+        for vehicle_id in vehicle_ids:
+            process_single_scene(
+                scene_id, vehicle_id, config, num_processes, threads_per_frame,
+                output_root, ego_vehicle_mapping
+            )
 
     overall_elapsed = time.time() - overall_start
 
