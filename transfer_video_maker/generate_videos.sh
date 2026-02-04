@@ -11,8 +11,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 默认配置
-PROJECT_ROOT="/mnt/zihanw/proj_utils_pro/transfer_video_maker"
-OUTPUT_BASE="/mnt/zihanw/proj_utils_pro/transfer_video_maker/output"
+PROJECT_ROOT="/mnt/zihanw/proj_utils_pro_Roadside/transfer_video_maker"
+OUTPUT_BASE="/mnt/zihanw/proj_utils_pro_Roadside/transfer_video_maker/output"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Transfer2 视频数据集生成器${NC}"
@@ -42,10 +42,10 @@ get_user_input() {
     echo ""
     echo -e "${GREEN}配置参数:${NC}"
 
-    # 场景ID
-    read -p "场景ID列表（空格分隔，如 002 004 006）: " scenes
+    # 场景目录
+    read -p "场景目录列表（空格分隔，如 004_id45 004_id67 005_id19）: " scenes
     if [ -z "$scenes" ]; then
-        echo -e "${RED}错误: 场景ID不能为空${NC}"
+        echo -e "${RED}错误: 场景目录不能为空${NC}"
         exit 1
     fi
 

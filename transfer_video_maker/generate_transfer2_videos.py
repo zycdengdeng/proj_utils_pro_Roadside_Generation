@@ -42,7 +42,7 @@ def parse_args():
                         help='项目根目录')
 
     parser.add_argument('--scenes', type=str, nargs='+', required=True,
-                        help='场景ID列表（如 002 004 006）')
+                        help='场景目录列表，格式为 场景ID_id车辆ID（如 004_id45 004_id67 005_id19）')
 
     parser.add_argument('--frames-per-seg', type=int, required=True,
                         help='每个seg的帧数（如 21）')
@@ -194,16 +194,37 @@ def create_caption_json(scene_id, seg_id, camera_name, caption_template):
     }
 
 
-def process_single_scene(args, scene_id):
+def parse_scene_entry(scene_entry):
+    """
+    解析场景目录名，提取场景ID和车辆ID
+
+    Args:
+        scene_entry: 场景目录名，格式为 '004_id45'
+
+    Returns:
+        (scene_id, vehicle_id_str, scene_entry)
+        例如: ('004', '45', '004_id45')
+    """
+    import re
+    match = re.match(r'^(\d+)_id(\d+)$', scene_entry)
+    if match:
+        return match.group(1), match.group(2), scene_entry
+    # 兼容旧格式：纯场景ID（无vehicle_id）
+    return scene_entry, None, scene_entry
+
+
+def process_single_scene(args, scene_entry):
     """
     处理单个场景
 
     Args:
         args: 命令行参数
-        scene_id: 场景ID
+        scene_entry: 场景目录名，格式为 '004_id45'
     """
+    scene_id, vehicle_id_str, dir_name = parse_scene_entry(scene_entry)
+
     print(f"\n{'='*60}")
-    print(f"处理场景: {scene_id}")
+    print(f"处理场景: {scene_id}, 车辆ID: {vehicle_id_str or '无'}")
     print(f"{'='*60}")
 
     # 构建场景目录路径
@@ -217,9 +238,8 @@ def process_single_scene(args, scene_id):
     }
 
     project_dir = project_dir_map.get(args.project_type, args.project_type)
-    # 路径结构: project_root / project_dir / scene_id / scene_id / timestamp
-    # 例如: blur投影/002/002/1742877430866/gt
-    scene_dir = Path(args.project_root) / project_dir / scene_id / scene_id
+    # 路径结构: project_root / project_dir / 004_id45 / 004 / timestamp
+    scene_dir = Path(args.project_root) / project_dir / dir_name / scene_id
 
     print(f"场景目录: {scene_dir}")
 
@@ -303,20 +323,27 @@ def process_single_scene(args, scene_id):
                 print(f"    跳过 seg{seg_id:02d}：无有效控制输入图像")
                 continue
 
-            video_filename = f"{scene_id}_seg{seg_id:02d}.mp4"
+            # 文件名：带车辆ID（如 004_id45_seg01.mp4）
+            if vehicle_id_str:
+                file_base = f"{scene_id}_id{vehicle_id_str}_seg{seg_id:02d}"
+            else:
+                file_base = f"{scene_id}_seg{seg_id:02d}"
+
+            # 输出按场景分组（scene004/）
+            scene_folder = f"scene{scene_id}"
 
             # 创建GT视频（videos/），统一分辨率1280×720
-            video_output_path = Path(args.output_dir) / 'videos' / transfer_cam_name / video_filename
+            video_output_path = Path(args.output_dir) / 'videos' / transfer_cam_name / scene_folder / f"{file_base}.mp4"
             create_video_from_images(gt_image_paths, video_output_path, args.fps)
             print(f"    ✓ GT视频: {video_output_path}")
 
             # 创建控制输入视频（control_input_xxx/），统一分辨率1280×720
-            control_output_path = Path(args.output_dir) / f'control_input_{args.control_input_type}' / transfer_cam_name / video_filename
+            control_output_path = Path(args.output_dir) / f'control_input_{args.control_input_type}' / transfer_cam_name / scene_folder / f"{file_base}.mp4"
             create_video_from_images(control_image_paths, control_output_path, args.fps)
             print(f"    ✓ 控制视频: {control_output_path}")
 
             # 创建 caption JSON
-            caption_output_path = Path(args.output_dir) / 'captions' / transfer_cam_name / f"{scene_id}_seg{seg_id:02d}.json"
+            caption_output_path = Path(args.output_dir) / 'captions' / transfer_cam_name / scene_folder / f"{file_base}.json"
             caption_output_path.parent.mkdir(parents=True, exist_ok=True)
 
             caption_data = create_caption_json(scene_id, seg_id, transfer_cam_name, args.caption_template)
@@ -324,7 +351,7 @@ def process_single_scene(args, scene_id):
             with open(caption_output_path, 'w', encoding='utf-8') as f:
                 json.dump(caption_data, f, indent=2, ensure_ascii=False)
 
-    print(f"\n✓ 场景 {scene_id} 处理完成")
+    print(f"\n✓ 场景 {scene_id} (车辆ID: {vehicle_id_str or '无'}) 处理完成")
     return True
 
 
@@ -336,7 +363,7 @@ def main():
     print("Transfer2 视频数据集生成器")
     print("="*60)
     print(f"项目类型: {args.project_type}")
-    print(f"场景列表: {', '.join(args.scenes)}")
+    print(f"场景目录: {', '.join(args.scenes)}")
     print(f"每个seg帧数: {args.frames_per_seg}")
     print(f"seg数量: {args.num_segs}")
     print(f"总帧数/场景: {args.frames_per_seg * args.num_segs}")
@@ -351,8 +378,8 @@ def main():
 
     # 处理每个场景
     success_count = 0
-    for scene_id in args.scenes:
-        if process_single_scene(args, scene_id):
+    for scene_entry in args.scenes:
+        if process_single_scene(args, scene_entry):
             success_count += 1
 
     print(f"\n{'='*60}")
@@ -362,18 +389,19 @@ def main():
     # 显示输出目录结构
     print(f"\n输出目录结构:")
     print(f"  {args.output_dir}/")
-    print(f"    ├── videos/                                 (GT去畸变视频)")
-    for cam_name in CAMERA_NAMES[:2]:
-        print(f"    │   ├── {CAMERA_NAME_MAPPING[cam_name]}/")
-    print(f"    │   └── ... (全部7个相机)")
-    print(f"    ├── control_input_{args.control_input_type}/  (控制输入视频)")
-    for cam_name in CAMERA_NAMES[:2]:
-        print(f"    │   ├── {CAMERA_NAME_MAPPING[cam_name]}/")
-    print(f"    │   └── ... (全部7个相机)")
-    print(f"    └── captions/                               (caption JSON)")
-    for cam_name in CAMERA_NAMES[:2]:
-        print(f"        ├── {CAMERA_NAME_MAPPING[cam_name]}/")
-    print(f"        └── ... (全部7个相机)")
+    print(f"    ├── videos/")
+    print(f"    │   └── {{camera}}/")
+    print(f"    │       └── scene{{场景ID}}/")
+    print(f"    │           ├── {{场景ID}}_id{{车辆ID}}_seg01.mp4")
+    print(f"    │           └── ...")
+    print(f"    ├── control_input_{args.control_input_type}/")
+    print(f"    │   └── {{camera}}/")
+    print(f"    │       └── scene{{场景ID}}/")
+    print(f"    │           └── ...")
+    print(f"    └── captions/")
+    print(f"        └── {{camera}}/")
+    print(f"            └── scene{{场景ID}}/")
+    print(f"                └── ...")
 
 
 if __name__ == "__main__":
