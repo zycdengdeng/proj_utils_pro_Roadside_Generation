@@ -329,13 +329,13 @@ class HDMapProjectorMultiThread:
         bbox_img = np.zeros((img_h, img_w, 3), dtype=np.uint8)  # 黑色背景
 
         if results['bboxes']:
-            # 如果有bbox，绘制在黑色背景上
+            # 如果有bbox，绘制实心填充框在黑色背景上
             for bbox_info in results['bboxes']:
                 x1, y1, x2, y2 = [int(v) for v in bbox_info['bbox_2d']]
                 color = tuple(int(c) for c in bbox_info['color'])
-                cv2.rectangle(bbox_img, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(bbox_img, (x1, y1), (x2, y2), color, cv2.FILLED)
 
-        # 总是保存overlay（有bbox就是黑色+bbox，没bbox就是纯黑色）
+        # 总是保存overlay（有bbox就是黑色+实心bbox，没bbox就是纯黑色）
         overlay_output = overlay_dir / f"{cam_name}.jpg"
         cv2.imwrite(str(overlay_output), bbox_img, [cv2.IMWRITE_JPEG_QUALITY, 100])
 
@@ -345,11 +345,14 @@ class HDMapProjectorMultiThread:
             bbox_on_gt_img = results['gt_img'].copy()
 
             if results['bboxes']:
-                # 如果有bbox，绘制在GT图像上
+                # 如果有bbox，绘制半透明实心填充框在GT图像上
+                overlay = bbox_on_gt_img.copy()
                 for bbox_info in results['bboxes']:
                     x1, y1, x2, y2 = [int(v) for v in bbox_info['bbox_2d']]
                     color = tuple(int(c) for c in bbox_info['color'])
-                    cv2.rectangle(bbox_on_gt_img, (x1, y1), (x2, y2), color, 2)
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, cv2.FILLED)
+                # 半透明叠加（alpha=0.4），避免完全遮挡GT图像
+                cv2.addWeighted(overlay, 0.4, bbox_on_gt_img, 0.6, 0, bbox_on_gt_img)
 
             # 总是保存bbox_on_gt（有bbox就是GT+bbox，没bbox就是纯GT）
             bbox_on_gt_output = bbox_on_gt_dir / f"{cam_name}.jpg"
