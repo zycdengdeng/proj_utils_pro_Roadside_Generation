@@ -32,6 +32,15 @@ def main():
         sys.exit(1)
 
     # 保存配置供后续项目使用
+    # 同时预加载自车ID映射（HDMap投影需要）
+    ego_vehicle_mapping = common_utils.get_ego_vehicle_id(
+        scene_ids=config['scene_ids'],
+        batch_mode_enabled=False,
+        default_id=45
+    )
+    if ego_vehicle_mapping:
+        config['ego_vehicle_mapping'] = ego_vehicle_mapping
+
     common_utils.save_batch_config(config)
 
     print("\n✅ 配置已保存，准备执行批量投影...")
