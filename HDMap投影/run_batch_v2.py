@@ -51,20 +51,19 @@ def run_single_projection(args):
 
 
 def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_per_frame,
-                        project_root, ego_vehicle_mapping):
+                        project_root):
     """处理单个场景的单个车辆ID"""
     print(f"\n{'='*80}")
     print(f"开始处理场景: {scene_id}, 车辆ID: {vehicle_id}")
     print(f"{'='*80}")
 
-    # 获取当前场景的自车ID
-    ego_vehicle_id = ego_vehicle_mapping.get(scene_id, 45)
-    print(f"🚗 当前场景自车ID: {ego_vehicle_id}")
+    # 自车ID = 目标车辆ID（投影到该车视角，同时排除该车的bbox）
+    ego_vehicle_id = vehicle_id
 
     # 为当前场景+车辆ID创建独立的输出目录
     output_root = Path(project_root) / f"{scene_id}_id{vehicle_id}"
     print(f"📂 输出目录: {output_root}")
-    print(f"🚗 目标车辆ID: {vehicle_id}")
+    print(f"🚗 目标车辆ID（同时排除该车bbox）: {vehicle_id}")
 
     # 获取场景路径
     scene_paths = common_utils.get_scene_paths(scene_id)
@@ -133,7 +132,6 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
 
     # 多进程处理
     print(f"\n🚀 开始处理 ({num_processes}进程 × {threads_per_frame}线程)...")
-    print(f"   自车ID（排除）: {ego_vehicle_id}")
     success_count = 0
     failed_list = []
     start_time = time.time()
@@ -203,17 +201,6 @@ def main():
         print("❌ 配置输入失败")
         sys.exit(1)
 
-    # 自车ID配置（支持批量模式，返回场景ID→自车ID映射）
-    ego_vehicle_mapping = common_utils.get_ego_vehicle_id(
-        scene_ids=config['scene_ids'],
-        batch_mode_enabled=batch_mode,
-        default_id=45
-    )
-
-    if not ego_vehicle_mapping:
-        print("❌ 自车ID配置失败")
-        sys.exit(1)
-
     # 并行配置（支持批量模式）
     parallel_config = common_utils.get_parallel_config(batch_mode_enabled=batch_mode)
     num_processes = parallel_config['num_processes']
@@ -230,7 +217,6 @@ def main():
     for sid in config['scene_ids']:
         vids = scene_vehicle_ids.get(sid, [45])
         print(f"   场景 {sid} → 车辆ID: {vids} → 输出: {', '.join(f'{sid}_id{v}' for v in vids)}")
-        print(f"      自车ID（排除）: {ego_vehicle_mapping.get(sid, 45)}")
     print(f"   批次模式: {config['batch_mode']}")
     print(f"   并行配置: {num_processes}进程 × {threads_per_frame}线程")
     print(f"   输出目录: {output_root}/{{场景ID}}_id{{车辆ID}}/")
@@ -252,7 +238,7 @@ def main():
         for vehicle_id in vehicle_ids:
             process_single_scene(
                 scene_id, vehicle_id, config, num_processes, threads_per_frame,
-                output_root, ego_vehicle_mapping
+                output_root
             )
 
     overall_elapsed = time.time() - overall_start
