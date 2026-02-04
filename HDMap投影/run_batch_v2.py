@@ -24,7 +24,7 @@ PROJECTOR_SCRIPT = Path(__file__).resolve().parent / "undistort_projection_multi
 def run_single_projection(args):
     """运行单个投影任务"""
     annotation_path, timestamp_ms, output_dir, roadside_calib, vehicle_calib, \
-    gt_images_folder, transform_json, ego_vehicle_id, threads_per_frame = args
+    gt_images_folder, vehicle_id, ego_vehicle_id, threads_per_frame = args
 
     try:
         # 动态导入核心模块
@@ -33,24 +33,14 @@ def run_single_projection(args):
         projector_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(projector_module)
 
-        # 加载变换矩阵（每个进程加载一次）
-        if not hasattr(run_single_projection, 'transforms_cache'):
-            run_single_projection.transforms_cache = {}
-
-        if transform_json not in run_single_projection.transforms_cache:
-            run_single_projection.transforms_cache[transform_json] = \
-                common_utils.load_world2lidar_transforms(transform_json, show_range=False)
-
-        transforms = run_single_projection.transforms_cache[transform_json]
-
         # 创建投影器
         projector = projector_module.HDMapProjectorMultiThread(
-            roadside_calib, vehicle_calib, gt_images_folder, transforms
+            roadside_calib, vehicle_calib, gt_images_folder
         )
 
         # 处理单帧
         success = projector.process_single_frame(
-            annotation_path, output_dir, timestamp_ms, ego_vehicle_id, threads_per_frame
+            annotation_path, output_dir, timestamp_ms, vehicle_id, ego_vehicle_id, threads_per_frame
         )
 
         return success, "成功" if success else "处理失败", timestamp_ms
@@ -58,17 +48,6 @@ def run_single_projection(args):
     except Exception as e:
         error_msg = str(e)
         return False, error_msg[:100], timestamp_ms
-
-
-def get_scene_transform_json(config, scene_id):
-    """获取场景对应的transform JSON路径"""
-    transform_json = config['transform_json']
-
-    # 如果是字典，根据scene_id获取对应路径
-    if isinstance(transform_json, dict):
-        return transform_json.get(scene_id)
-    # 如果是字符串，直接返回（所有场景共用）
-    return transform_json
 
 
 def process_single_scene(scene_id, config, num_processes, threads_per_frame,
@@ -82,16 +61,13 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame,
     ego_vehicle_id = ego_vehicle_mapping.get(scene_id, 45)
     print(f"🚗 当前场景自车ID: {ego_vehicle_id}")
 
-    # 获取当前场景的transform JSON路径
-    scene_transform_json = get_scene_transform_json(config, scene_id)
-    if not scene_transform_json:
-        print(f"❌ 场景 {scene_id} 缺少transform JSON路径")
-        return
+    # 获取车辆ID（用于计算world2lidar变换）
+    vehicle_id = config.get('vehicle_id', 45)
 
     # 为当前场景创建独立的输出目录
     output_root = Path(project_root) / scene_id
     print(f"📂 输出目录: {output_root}")
-    print(f"📄 Transform JSON: {scene_transform_json}")
+    print(f"🚗 目标车辆ID: {vehicle_id}")
 
     # 获取场景路径
     scene_paths = common_utils.get_scene_paths(scene_id)
@@ -130,9 +106,6 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame,
         print(f"   标注时间戳范围: {min(annotation_timestamps):.0f} ~ {max(annotation_timestamps):.0f}")
         print(f"   标注时间跨度: {(max(annotation_timestamps) - min(annotation_timestamps)) / 1000:.1f} 秒")
 
-    # 加载并显示transform时间戳范围
-    transforms = common_utils.load_world2lidar_transforms(scene_transform_json, show_range=True)
-
     # 创建输出目录
     output_paths = common_utils.get_unified_output_paths(output_root, scene_id, 'hdmap')
     common_utils.create_output_dirs(output_paths)
@@ -156,7 +129,7 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame,
             scene_paths['roadside_calib'],
             scene_paths['vehicle_calib'],
             scene_paths.get('vehicle_images', scene_paths['roadside_images']),
-            scene_transform_json,
+            vehicle_id,
             ego_vehicle_id,
             threads_per_frame
         ))
@@ -258,6 +231,7 @@ def main():
     print(f"   场景数量: {len(config['scene_ids'])}")
     print(f"   场景列表: {', '.join(config['scene_ids'])}")
     print(f"   批次模式: {config['batch_mode']}")
+    print(f"   目标车辆ID: {config.get('vehicle_id', 45)}")
     print(f"   自车ID配置:")
     for scene_id in config['scene_ids']:
         print(f"      场景 {scene_id}: 自车ID = {ego_vehicle_mapping[scene_id]}")

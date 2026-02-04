@@ -23,8 +23,8 @@ PROJECTOR_SCRIPT = Path(__file__).resolve().parent / "undistort_projection_multi
 
 def run_single_projection(args):
     """运行单个投影任务"""
-    pcd_path, timestamp_ms, output_dir, roadside_calib, vehicle_calib, \
-    gt_images_folder, transform_json, threads_per_frame = args
+    pcd_path, annotation_path, timestamp_ms, output_dir, roadside_calib, vehicle_calib, \
+    gt_images_folder, vehicle_id, threads_per_frame = args
 
     try:
         # 动态导入核心模块
@@ -33,25 +33,14 @@ def run_single_projection(args):
         projector_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(projector_module)
 
-        # 加载变换矩阵（每个进程加载一次）
-        if not hasattr(run_single_projection, 'transforms_cache'):
-            run_single_projection.transforms_cache = {}
-
-        if transform_json not in run_single_projection.transforms_cache:
-            # 第一次加载时显示范围
-            run_single_projection.transforms_cache[transform_json] = \
-                common_utils.load_world2lidar_transforms(transform_json, show_range=False)
-
-        transforms = run_single_projection.transforms_cache[transform_json]
-
         # 创建投影器
         projector = projector_module.UndistortProjectorMultiThread(
-            roadside_calib, vehicle_calib, gt_images_folder, transforms
+            roadside_calib, vehicle_calib, gt_images_folder
         )
 
         # 处理单帧
         success = projector.process_single_frame(
-            pcd_path, output_dir, timestamp_ms, threads_per_frame
+            pcd_path, annotation_path, output_dir, timestamp_ms, vehicle_id, threads_per_frame
         )
 
         return success, "成功" if success else "处理失败", timestamp_ms
@@ -61,33 +50,19 @@ def run_single_projection(args):
         return False, error_msg[:100], timestamp_ms
 
 
-def get_scene_transform_json(config, scene_id):
-    """获取场景对应的transform JSON路径"""
-    transform_json = config['transform_json']
-
-    # 如果是字典，根据scene_id获取对应路径
-    if isinstance(transform_json, dict):
-        return transform_json.get(scene_id)
-    # 如果是字符串，直接返回（所有场景共用）
-    return transform_json
-
-
 def process_single_scene(scene_id, config, num_processes, threads_per_frame, project_root):
     """处理单个场景"""
     print(f"\n{'='*80}")
     print(f"开始处理场景: {scene_id}")
     print(f"{'='*80}")
 
-    # 获取当前场景的transform JSON路径
-    scene_transform_json = get_scene_transform_json(config, scene_id)
-    if not scene_transform_json:
-        print(f"❌ 场景 {scene_id} 缺少transform JSON路径")
-        return
+    # 获取车辆ID
+    vehicle_id = config.get('vehicle_id', 45)
 
     # 为当前场景创建独立的输出目录
     output_root = Path(project_root) / scene_id
     print(f"📂 输出目录: {output_root}")
-    print(f"📄 Transform JSON: {scene_transform_json}")
+    print(f"🚗 目标车辆ID: {vehicle_id}")
 
     # 获取场景路径
     scene_paths = common_utils.get_scene_paths(scene_id)
@@ -105,6 +80,15 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame, pro
 
     # 按时间戳排序
     pcd_files = common_utils.sort_files_by_timestamp(pcd_files)
+
+    # 获取标注文件列表（用于匹配PCD时间戳）
+    label_folder = Path(scene_paths['roadside_labels'])
+    annotation_files = {
+        int(common_utils.extract_timestamp_from_filename(f)): f
+        for f in label_folder.glob("*.json")
+        if common_utils.extract_timestamp_from_filename(f) is not None
+    }
+    print(f"   标注文件数: {len(annotation_files)}")
 
     print(f"\n📁 场景信息:")
     print(f"   名称: {scene_paths['scene_name']}")
@@ -126,9 +110,6 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame, pro
         print(f"   PCD时间戳范围: {min(pcd_timestamps):.0f} ~ {max(pcd_timestamps):.0f}")
         print(f"   PCD时间跨度: {(max(pcd_timestamps) - min(pcd_timestamps)) / 1000:.1f} 秒")
 
-    # 加载并显示transform时间戳范围
-    transforms = common_utils.load_world2lidar_transforms(scene_transform_json, show_range=True)
-
     # 创建输出目录
     output_paths = common_utils.get_unified_output_paths(output_root, scene_id, 'basic')
     common_utils.create_output_dirs(output_paths)
@@ -145,14 +126,21 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame, pro
 
         output_frame_dir = output_root_path / str(int(timestamp_ms))
 
+        # 查找对应时间戳的标注文件
+        annotation_file = annotation_files.get(int(timestamp_ms))
+        if annotation_file is None:
+            print(f"   ⚠️  时间戳 {int(timestamp_ms)} 无对应标注文件，跳过")
+            continue
+
         tasks.append((
             str(pcd_file),
+            str(annotation_file),
             int(timestamp_ms),
             str(output_frame_dir),
             scene_paths['roadside_calib'],
             scene_paths['vehicle_calib'],
-            scene_paths.get('vehicle_images', scene_paths['roadside_images']),  # 优先使用车端GT图像
-            scene_transform_json,
+            scene_paths.get('vehicle_images', scene_paths['roadside_images']),
+            vehicle_id,
             threads_per_frame
         ))
 
@@ -168,7 +156,7 @@ def process_single_scene(scene_id, config, num_processes, threads_per_frame, pro
         with tqdm(total=len(tasks), desc=f"场景{scene_id}", unit="帧") as pbar:
             for future in as_completed(futures):
                 task = futures[future]
-                timestamp_ms = task[1]
+                timestamp_ms = task[2]
 
                 try:
                     success, message, _ = future.result()
@@ -263,6 +251,7 @@ def main():
     print(f"   场景数量: {len(config['scene_ids'])}")
     print(f"   场景列表: {', '.join(config['scene_ids'])}")
     print(f"   批次模式: {config['batch_mode']}")
+    print(f"   目标车辆ID: {config.get('vehicle_id', 45)}")
     print(f"   并行配置: {num_processes}进程 × {threads_per_frame}线程")
     print(f"   输出目录: {output_root}/{{场景ID}}/")
     print(f"{'='*80}")

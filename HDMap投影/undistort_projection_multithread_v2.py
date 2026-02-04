@@ -128,7 +128,7 @@ def find_gt_image(gt_images_folder, camera_name, timestamp_ms):
 
 
 class HDMapProjectorMultiThread:
-    def __init__(self, roadside_calib_path, vehicle_calib_folder, gt_images_folder, transforms):
+    def __init__(self, roadside_calib_path, vehicle_calib_folder, gt_images_folder):
         """
         初始化HDMap投影器
 
@@ -136,39 +136,16 @@ class HDMapProjectorMultiThread:
             roadside_calib_path: 路侧标定文件路径
             vehicle_calib_folder: 车端标定文件夹路径
             gt_images_folder: 真值图像文件夹
-            transforms: world2lidar 变换矩阵列表
         """
         with open(roadside_calib_path, 'r') as f:
             self.roadside_calib = json.load(f)
         self.vehicle_calib_folder = Path(vehicle_calib_folder)
         self.gt_images_folder = Path(gt_images_folder)
-        self.transforms = transforms
         self.camera_poses = {}
         self.camera_params = {}
 
         # 设置OpenCV线程数
         cv2.setNumThreads(0)
-
-    def get_world2lidar_transform(self, timestamp_ms):
-        """
-        获取 world2lidar 变换矩阵
-
-        Args:
-            timestamp_ms: 时间戳（毫秒）
-
-        Returns:
-            rotation_vector: 旋转向量（罗德里格斯）
-            translation: 平移向量
-        """
-        transform = common_utils.find_closest_transform(timestamp_ms, self.transforms)
-
-        if transform is None:
-            raise ValueError(f"未找到时间戳 {timestamp_ms} 对应的变换矩阵")
-
-        rotation = np.array(transform['world2lidar']['rotation']).reshape((3, 1))
-        translation = np.array(transform['world2lidar']['translation']).reshape((3, 1))
-
-        return rotation, translation
 
     def load_camera_params(self, cam_id):
         """加载车端相机参数（使用固定标定路径）"""
@@ -381,7 +358,7 @@ class HDMapProjectorMultiThread:
         return results
 
     def process_single_frame(self, annotation_path, output_dir, timestamp_ms,
-                           ego_vehicle_id=45, num_threads=7):
+                           vehicle_id, ego_vehicle_id=45, num_threads=7):
         """
         处理单帧数据（多线程）
 
@@ -389,6 +366,7 @@ class HDMapProjectorMultiThread:
             annotation_path: 标注文件路径
             output_dir: 输出目录
             timestamp_ms: 时间戳（毫秒）
+            vehicle_id: 车辆ID
             ego_vehicle_id: 自车ID（将被排除）
             num_threads: 线程数
         """
@@ -407,8 +385,10 @@ class HDMapProjectorMultiThread:
 
         # 2. 获取 world2lidar 变换
         try:
-            rotate_world2lidar, trans_world2lidar = self.get_world2lidar_transform(timestamp_ms)
-        except ValueError as e:
+            rotate_world2lidar, trans_world2lidar = common_utils.compute_world2lidar_from_annotation(
+                annotation_path, vehicle_id
+            )
+        except (FileNotFoundError, ValueError) as e:
             print(f"❌ {e}")
             return False
 
@@ -466,23 +446,20 @@ def main():
     parser.add_argument("--vehicle-calib", type=str, required=True)
     parser.add_argument("--gt-images", type=str, required=True)
     parser.add_argument("--annotation", type=str, required=True)
-    parser.add_argument("--transform-json", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--timestamp", type=int, required=True)
+    parser.add_argument("--vehicle-id", type=int, required=True)
     parser.add_argument("--ego-vehicle-id", type=int, default=45)
     parser.add_argument("--num-threads", type=int, default=7)
 
     args = parser.parse_args()
 
-    # 加载变换矩阵
-    transforms = common_utils.load_world2lidar_transforms(args.transform_json)
-
     projector = HDMapProjectorMultiThread(
-        args.roadside_calib, args.vehicle_calib, args.gt_images, transforms
+        args.roadside_calib, args.vehicle_calib, args.gt_images
     )
     projector.process_single_frame(
         args.annotation, args.output_dir, args.timestamp,
-        args.ego_vehicle_id, args.num_threads
+        args.vehicle_id, args.ego_vehicle_id, args.num_threads
     )
 
 if __name__ == "__main__":

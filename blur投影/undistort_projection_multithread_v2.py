@@ -133,7 +133,7 @@ def find_roadside_image(roadside_images_folder, pinhole_name, cam_id, timestamp_
 
 class BlurProjectorMultiThread:
     def __init__(self, roadside_calib_path, roadside_images_folder, vehicle_calib_folder,
-                 gt_images_folder, transforms):
+                 gt_images_folder):
         """
         初始化投影器
 
@@ -142,43 +142,18 @@ class BlurProjectorMultiThread:
             roadside_images_folder: 路侧图像文件夹路径
             vehicle_calib_folder: 车端标定文件夹路径
             gt_images_folder: 真值图像文件夹
-            transforms: world2lidar 变换矩阵列表
         """
         with open(roadside_calib_path, 'r') as f:
             self.roadside_calib = json.load(f)
         self.roadside_images_folder = Path(roadside_images_folder)
         self.vehicle_calib_folder = Path(vehicle_calib_folder)
         self.gt_images_folder = Path(gt_images_folder)
-        self.transforms = transforms
         self.roadside_camera_params = {}
         self.vehicle_camera_params = {}
         self.camera_poses = {}
 
         # 设置OpenCV线程数
         cv2.setNumThreads(0)  # 让每个线程独立使用OpenCV
-
-    def get_world2lidar_transform(self, timestamp_ms):
-        """
-        获取 world2lidar 变换矩阵
-
-        Args:
-            timestamp_ms: 时间戳（毫秒）
-
-        Returns:
-            rotation_vector: 旋转向量（罗德里格斯）
-            translation: 平移向量
-        """
-        # 查找最接近的变换矩阵
-        transform = common_utils.find_closest_transform(timestamp_ms, self.transforms)
-
-        if transform is None:
-            raise ValueError(f"未找到时间戳 {timestamp_ms} 对应的变换矩阵")
-
-        # 提取旋转和平移
-        rotation = np.array(transform['world2lidar']['rotation']).reshape((3, 1))
-        translation = np.array(transform['world2lidar']['translation']).reshape((3, 1))
-
-        return rotation, translation
 
     def load_roadside_camera_params(self, pinhole_id):
         """加载路侧相机参数"""
@@ -515,14 +490,16 @@ class BlurProjectorMultiThread:
 
         return results
 
-    def process_single_frame(self, pcd_path, output_dir, timestamp_ms, num_threads=7):
+    def process_single_frame(self, pcd_path, annotation_path, output_dir, timestamp_ms, vehicle_id, num_threads=7):
         """
         处理单帧数据（多线程）
 
         Args:
             pcd_path: PCD文件路径
+            annotation_path: 标注文件路径
             output_dir: 输出目录
             timestamp_ms: 时间戳（毫秒）
+            vehicle_id: 车辆ID
             num_threads: 线程数
         """
         output_dir = Path(output_dir)
@@ -542,8 +519,10 @@ class BlurProjectorMultiThread:
 
         # 2. 获取 world2lidar 变换
         try:
-            rotate_world2lidar, trans_world2lidar = self.get_world2lidar_transform(timestamp_ms)
-        except ValueError as e:
+            rotate_world2lidar, trans_world2lidar = common_utils.compute_world2lidar_from_annotation(
+                annotation_path, vehicle_id
+            )
+        except (FileNotFoundError, ValueError) as e:
             print(f"❌ {e}")
             return False
 
@@ -582,22 +561,21 @@ def main():
     parser.add_argument("--vehicle-calib", type=str, required=True)
     parser.add_argument("--gt-images", type=str, required=True)
     parser.add_argument("--pcd", type=str, required=True)
-    parser.add_argument("--transform-json", type=str, required=True)
+    parser.add_argument("--annotation", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--timestamp", type=int, required=True)
+    parser.add_argument("--vehicle-id", type=int, required=True)
     parser.add_argument("--num-threads", type=int, default=7, help="每帧使用的线程数")
 
     args = parser.parse_args()
 
-    # 加载变换矩阵
-    transforms = common_utils.load_world2lidar_transforms(args.transform_json)
-
     projector = BlurProjectorMultiThread(
         args.roadside_calib, args.roadside_images, args.vehicle_calib,
-        args.gt_images, transforms
+        args.gt_images
     )
     projector.process_single_frame(
-        args.pcd, args.output_dir, args.timestamp, args.num_threads
+        args.pcd, args.annotation, args.output_dir, args.timestamp,
+        args.vehicle_id, args.num_threads
     )
 
 if __name__ == "__main__":

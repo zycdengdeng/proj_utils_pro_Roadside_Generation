@@ -9,8 +9,10 @@ import os
 import json
 import glob
 import numpy as np
+import cv2
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+from scipy.spatial.transform import Rotation as SciR
 import tempfile
 
 
@@ -26,6 +28,98 @@ ROADSIDE_CALIB_FILE = os.path.join(SUPPORT_INFO_DIR, "calib.json")
 
 # 自车ID映射文件（support_info目录下）
 CARID_JSON_FILE = os.path.join(SUPPORT_INFO_DIR, "carid.json")
+
+
+# ==================== 车辆位姿 → world2lidar 变换 ====================
+# IMU/LiDAR安装偏移量（硬件固定参数）
+LIDAR_ADJUST = {
+    'x_offset': 0.0,
+    'y_offset': -2.0,
+    'z_offset': 1.0,
+}
+
+IMU_IN_CAR = {
+    'x': 1.385,
+    'y': 0.0,
+}
+
+LIDAR_TO_IMU = {
+    'x': 0.003551,
+    'y': 1.630648,
+    'z': 1.262754,
+}
+
+
+def _get_world2carlidar(rotate_car2world, trans_car2world, lidar2car_quat, lidar2car_trans):
+    """计算从世界坐标系到车载LiDAR坐标系的变换"""
+    R_car2world = cv2.Rodrigues(rotate_car2world)[0]
+    R_world2car = R_car2world.T
+    t_world2car = -R_world2car @ trans_car2world
+
+    r_lidar2car = SciR.from_quat(lidar2car_quat)
+    R_lidar2car = r_lidar2car.as_matrix()
+
+    R_car2lidar = R_lidar2car.T
+    lidar2car_trans_array = np.asarray(lidar2car_trans).reshape((3, 1))
+    t_car2lidar = -R_car2lidar @ lidar2car_trans_array
+
+    R_world2lidar = R_car2lidar @ R_world2car
+    t_world2lidar = R_car2lidar @ t_world2car + t_car2lidar
+
+    rotation_vector, _ = cv2.Rodrigues(R_world2lidar)
+
+    return rotation_vector, t_world2lidar
+
+
+def compute_world2lidar_from_annotation(annotation_path, vehicle_id):
+    """
+    从路侧标注文件读取指定车辆的位姿，计算world2lidar变换
+
+    Args:
+        annotation_path: 路侧标注JSON文件路径
+        vehicle_id: 目标车辆ID
+
+    Returns:
+        rotation: 旋转向量 (3,1) - 罗德里格斯
+        translation: 平移向量 (3,1)
+    """
+    if not os.path.exists(annotation_path):
+        raise FileNotFoundError(f"标注文件不存在: {annotation_path}")
+
+    with open(annotation_path, 'r') as f:
+        annotation = json.load(f)
+
+    vehicle = None
+    for obj in annotation.get('object', []):
+        if obj['id'] == vehicle_id:
+            vehicle = obj
+            break
+
+    if vehicle is None:
+        raise ValueError(f"标注文件中未找到车辆ID {vehicle_id}")
+
+    car2world_rotate = np.array([
+        vehicle['roll'], vehicle['pitch'], vehicle['yaw']
+    ]).reshape((3, 1))
+    car2world_trans = np.array([
+        vehicle['x'], vehicle['y'], vehicle['z']
+    ]).reshape((3, 1))
+
+    lidar_quat = [0, 0, 0, 1]
+    box_height = vehicle.get('height', 1.72)
+    imu_in_car_z = box_height / 2 - 1.12
+
+    lidar_trans = [
+        IMU_IN_CAR['x'] + LIDAR_TO_IMU['x'] + LIDAR_ADJUST['x_offset'],
+        IMU_IN_CAR['y'] + LIDAR_TO_IMU['y'] + LIDAR_ADJUST['y_offset'],
+        imu_in_car_z + LIDAR_TO_IMU['z'] + LIDAR_ADJUST['z_offset'],
+    ]
+
+    rotation, translation = _get_world2carlidar(
+        car2world_rotate, car2world_trans, lidar_quat, lidar_trans
+    )
+
+    return rotation, translation
 
 
 # ==================== 场景路径管理 ====================
@@ -204,7 +298,6 @@ def transform_points_to_lidar(points_world: np.ndarray, transform: Dict) -> np.n
     translation = np.array(transform['world2lidar']['translation'])
 
     # 罗德里格斯向量转旋转矩阵
-    import cv2
     R, _ = cv2.Rodrigues(rotation)
 
     # 应用变换: p_lidar = R @ p_world + t
@@ -455,14 +548,7 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
             print("\n✓ 使用已保存的配置:")
             print(f"   场景: {', '.join(config['scene_ids'])}")
 
-            # 显示JSON配置（可能是字典或字符串）
-            transform_json = config['transform_json']
-            if isinstance(transform_json, dict):
-                print(f"   JSON: 每个场景使用各自的JSON文件")
-                for scene_id, json_path in transform_json.items():
-                    print(f"      {scene_id}: {json_path}")
-            else:
-                print(f"   JSON: {transform_json}")
+            print(f"   车辆ID: {config.get('vehicle_id', 45)}")
 
             print(f"   批次: {config['batch_mode']}")
             print(f"{'='*60}\n")
@@ -501,64 +587,17 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
         print("❌ 没有有效的场景")
         return None
 
-    # 2. 自动查找或手动输入world2lidar变换JSON路径
-    print("\n🔄 步骤 2/3: 选择world2lidar变换JSON路径")
-    print("   选项：")
-    print("     - auto    : 自动查找（从 transform_json/{场景ID}/world2lidar_transforms.json）")
-    print("     - manual  : 手动输入路径")
-    json_mode = input("   请选择模式 [auto]: ").strip() or "auto"
-
-    if json_mode == "auto":
-        # 自动查找模式
-        print("\n   使用自动查找模式...")
-        json_base_dir = Path(__file__).resolve().parent / "transform_json"
-
-        # 为每个场景查找对应的JSON文件
-        transform_jsons = {}
-        all_valid = True
-
-        for scene_id in valid_scenes:
-            json_path = json_base_dir / scene_id / "world2lidar_transforms.json"
-
-            if json_path.exists():
-                transform_jsons[scene_id] = str(json_path)
-                print(f"   ✓ 场景 {scene_id}: {json_path}")
-            else:
-                print(f"   ✗ 场景 {scene_id}: 未找到 JSON 文件 {json_path}")
-                all_valid = False
-
-        if not all_valid:
-            print("\n   ❌ 部分场景缺少 JSON 文件")
-            use_manual = input("   是否切换到手动模式? (y/n) [y]: ").strip().lower() or 'y'
-            if use_manual != 'y':
-                return None
-            json_mode = "manual"
-        else:
-            # 检查是否所有场景可以使用同一个JSON（路径相同）
-            unique_jsons = list(set(transform_jsons.values()))
-            if len(unique_jsons) == 1:
-                # 所有场景使用同一个JSON
-                transform_json = unique_jsons[0]
-                print(f"\n   ✓ 所有场景使用相同的变换文件: {transform_json}")
-            else:
-                # 多个不同的JSON，每个场景使用自己的JSON
-                print(f"\n   ✓ 每个场景使用各自的变换文件:")
-                for sid in valid_scenes:
-                    print(f"      场景 {sid}: {transform_jsons[sid]}")
-                # 保存映射关系而不是单个路径
-                transform_json = transform_jsons
-
-    if json_mode == "manual":
-        # 手动输入模式
-        print("\n   手动输入模式...")
-        print("   示例：/mnt/car_road_data_fix/transforms/world2lidar.json")
-        transform_json = input("   请输入路径: ").strip()
-
-        if not os.path.exists(transform_json):
-            print(f"❌ 文件不存在: {transform_json}")
-            return None
-
-        print(f"   ✓ 变换文件: {transform_json}")
+    # 2. 输入目标车辆ID（从路侧标注中查找）
+    print("\n🚗 步骤 2/3: 输入目标车辆ID")
+    print("   说明：将从路侧动态标注文件中读取该ID车辆的位姿，计算world2lidar变换")
+    print("   提示：可以输入任意存在于标注文件中的车辆ID")
+    vehicle_id_input = input("   请输入车辆ID [默认45]: ").strip()
+    try:
+        vehicle_id = int(vehicle_id_input) if vehicle_id_input else 45
+    except ValueError:
+        print(f"   ⚠️  无效输入，使用默认值 45")
+        vehicle_id = 45
+    print(f"   ✓ 目标车辆ID: {vehicle_id}")
 
     # 3. 选择批次模式
     print("\n📊 步骤 3/3: 选择批次模式")
@@ -575,7 +614,7 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
     # 返回配置（不包含并行配置，由各项目单独处理）
     config = {
         'scene_ids': valid_scenes,
-        'transform_json': transform_json,
+        'vehicle_id': vehicle_id,
         'batch_mode': batch_mode
     }
 
