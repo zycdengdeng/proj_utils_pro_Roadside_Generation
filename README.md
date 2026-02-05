@@ -18,7 +18,7 @@
 
 ### 交互流程（已更新）
 
-交互现在改为**逐个场景输入**，每个场景可以指定**多个车辆ID**：
+交互现在为**逐个场景输入**，每个场景可以指定**多个车辆ID**：
 
 ```
 步骤 1/2: 逐个输入场景和目标车辆ID
@@ -70,12 +70,42 @@ blur投影/
 这步的时候一开始要选7
 1. 脚本在这里 /mnt/zihanw/proj_utils_pro_Roadside/transfer_video_maker/generate_videos.sh
 2. 一开始的菜单同上，一般来讲直接选Batch就可以，然后选择自己想要的功能。
-3. 关于每个seg的帧数，seg的数量和视频帧率这些默认值是符合cosmos post training demo的配置，默认1280 720p，生成在transfer_video_maker/output，主要分类依据不是场景号，是根据transfer控制头分类的。
+3. 关于每个seg的帧数，seg的数量是3 和视频帧率29， 这些默认值是符合cosmos post training demo的配置，默认1280 720p，生成在transfer_video_maker/output，主要分类依据不是场景号，是根据transfer控制头分类的。
 
 ## caption替换方法
 1. 执行脚本 transfer_video_maker/generate_transfer2_videos.py
 2. 如果是替换单个头，就选单个，然后选择适应这个头的选项，每个选项都说明自己是哪个控制头的caption
 3. 如果替换多个头，直接选替换全部，然后会多一个自适应匹配的选项，选那个就可以
 4. 想替换预设caption直接改py脚本里面的txt就可以了
+
+选择话，看这个例子
+找到 3 个数据集:
+
+BlurProjection (147 个caption文件)
+DepthSparse (147 个caption文件)
+HDMapBbox (147 个caption文件)
+全部数据集
+退出
+请选择数据集 [1-4, 0]: 4
+
+已选择: 全部 3 个数据集
+
+总计: 441 个caption文件
+
+预设caption模板:
+0) 自动匹配（每个数据集使用对应的预设模板）
+
+unified: "{view_prefix}. The ego vehicle is traveling from {direction}..."
+depth: "{view_prefix}. The ego vehicle is traveling from {direction}..."
+自定义模板
+请选择模板 [0-3]: 0
+
+使用自动匹配模式：每个数据集使用对应的预设模板
+
+匹配结果:
+BlurProjection → unified
+DepthSparse → unified
+HDMapBbox → unified
+这个是对的
 
 ### 仅限于学习交流，商业用途可以给我磕头笑鼠
