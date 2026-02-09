@@ -35,7 +35,7 @@ CARID_JSON_FILE = os.path.join(SUPPORT_INFO_DIR, "carid.json")
 LIDAR_ADJUST = {
     'x_offset': 0.0,
     'y_offset': -2.0,
-    'z_offset': 1.0,
+    'z_offset': 0.0,  # 修复：去掉错误的1米偏移
 }
 
 IMU_IN_CAR = {
