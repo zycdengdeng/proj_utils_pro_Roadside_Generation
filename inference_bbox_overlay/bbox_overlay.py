@@ -24,6 +24,9 @@ import common_utils
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
+# world2lidar变换JSON文件目录
+TRANSFORM_JSON_DIR = "/mnt/zihanw/proj_utils_pro/transform_json"
+
 # 相机名称映射（视频文件名 → 标准相机名）
 CAMERA_NAME_MAPPING = {
     'front_tele_30fov': {'cam_id': 1, 'standard_name': 'FN'},
@@ -140,6 +143,82 @@ def load_carid_mapping(carid_json_path=CARID_JSON_PATH):
         print(f"⚠️ 加载carid.json失败: {e}")
 
     return mapping
+
+
+def load_world2lidar_transforms(scene_id):
+    """
+    从预计算的JSON文件加载world2lidar变换
+
+    Args:
+        scene_id: 场景ID（如 '031'）
+
+    Returns:
+        transforms: 变换列表，每个元素包含 timestamp_ms, rotation, translation
+    """
+    json_path = Path(TRANSFORM_JSON_DIR) / scene_id / "world2lidar_transforms.json"
+
+    if not json_path.exists():
+        print(f"  ⚠️ world2lidar变换文件不存在: {json_path}")
+        return None
+
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+
+        transforms = []
+        for item in data:
+            # timestamp 是秒，转换为毫秒
+            timestamp_sec = item['timestamp']
+            timestamp_ms = int(timestamp_sec * 1000)
+
+            rotation = np.array(item['world2lidar']['rotation'])
+            translation = np.array(item['world2lidar']['translation'])
+
+            transforms.append({
+                'timestamp_ms': timestamp_ms,
+                'rotation': rotation,
+                'translation': translation
+            })
+
+        # 按时间戳排序
+        transforms.sort(key=lambda x: x['timestamp_ms'])
+
+        print(f"  📂 加载了 {len(transforms)} 个world2lidar变换")
+        return transforms
+
+    except Exception as e:
+        print(f"  ⚠️ 加载world2lidar变换失败: {e}")
+        return None
+
+
+def find_closest_transform(timestamp_ms, transforms, tolerance_ms=5000):
+    """
+    根据时间戳找到最近的world2lidar变换
+
+    Args:
+        timestamp_ms: 目标时间戳（毫秒）
+        transforms: 变换列表
+        tolerance_ms: 容差（毫秒）
+
+    Returns:
+        (rotation, translation) 或 None
+    """
+    if not transforms:
+        return None, None
+
+    min_diff = float('inf')
+    closest = None
+
+    for t in transforms:
+        diff = abs(t['timestamp_ms'] - timestamp_ms)
+        if diff < min_diff:
+            min_diff = diff
+            closest = t
+
+    if min_diff > tolerance_ms:
+        return None, None
+
+    return closest['rotation'], closest['translation']
 
 
 def parse_folder_name(folder_name):
@@ -462,6 +541,12 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
         frames_per_seg, seg_num, frame_selection
     )
 
+    # 加载预计算的 world2lidar 变换（仅对本模块生效）
+    world2lidar_transforms = load_world2lidar_transforms(scene_id)
+    if world2lidar_transforms is None:
+        print(f"  ❌ 无法加载 world2lidar 变换")
+        return False
+
     # 打开输入视频
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -496,12 +581,18 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
                 with open(annotation_path, 'r') as f:
                     annotation = json.load(f)
 
-                # 计算world2lidar变换
+                # 从预计算的JSON获取world2lidar变换
                 try:
-                    rotate_world2lidar, trans_world2lidar = \
-                        common_utils.compute_world2lidar_from_annotation(
-                            str(annotation_path), vehicle_id
-                        )
+                    rotate_world2lidar, trans_world2lidar = find_closest_transform(
+                        timestamp_ms, world2lidar_transforms
+                    )
+
+                    if rotate_world2lidar is None:
+                        if frame_idx == 0:
+                            print(f"    ⚠️ 未找到匹配的world2lidar变换: timestamp={timestamp_ms}")
+                        out.write(frame)
+                        frame_idx += 1
+                        continue
 
                     # 第一帧打印调试信息
                     if frame_idx == 0:
@@ -509,6 +600,7 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
                         non_ego_objects = [o for o in annotation.get('object', []) if o['id'] != vehicle_id]
                         print(f"    调试: 标注中有 {num_objects} 个物体, 排除自车后 {len(non_ego_objects)} 个")
                         print(f"    视频分辨率: {width}x{height}")
+                        print(f"    使用预计算的world2lidar变换")
 
                     # 处理帧
                     frame = processor.process_single_frame(
