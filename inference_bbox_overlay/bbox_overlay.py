@@ -222,15 +222,22 @@ class BboxOverlayProcessor:
         }
 
     def project_bbox_to_2d(self, bbox_corners_world, rotate_world2lidar,
-                           trans_world2lidar, cam_id):
+                           trans_world2lidar, cam_id, target_resolution=None):
         """
         将3D bbox投影到相机并计算2D bbox
+
+        Args:
+            bbox_corners_world: 3D bbox角点（世界坐标系）
+            rotate_world2lidar: world2lidar旋转矩阵
+            trans_world2lidar: world2lidar平移向量
+            cam_id: 相机ID
+            target_resolution: 目标分辨率 (width, height)，用于缩放bbox
 
         Returns:
             bbox_2d: [x1, y1, x2, y2] or None
         """
         cam_info = VEHICLE_CAMERAS[cam_id]
-        img_w, img_h = cam_info["resolution"]
+        orig_w, orig_h = cam_info["resolution"]  # 原始分辨率
 
         K = self.camera_params[cam_id]['K']
         D = self.camera_params[cam_id]['D']
@@ -258,31 +265,41 @@ class BboxOverlayProcessor:
 
         points_valid = points_cam[valid_mask]
 
-        # 相机坐标系 → 图像坐标系
+        # 相机坐标系 → 图像坐标系（使用原始分辨率计算）
         if cam_id in [2, 3, 4] and np.max(np.abs(D)) > 1:
             new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                K, D[:4], (img_w, img_h), np.eye(3), balance=0.0
+                K, D[:4], (orig_w, orig_h), np.eye(3), balance=0.0
             )
         else:
-            new_K, _ = cv2.getOptimalNewCameraMatrix(K, D, (img_w, img_h), 0, (img_w, img_h))
+            new_K, _ = cv2.getOptimalNewCameraMatrix(K, D, (orig_w, orig_h), 0, (orig_w, orig_h))
 
         uv_homogeneous = (new_K @ points_valid.T).T
         z_proj = uv_homogeneous[:, 2]
         uv = uv_homogeneous[:, :2] / z_proj[:, np.newaxis]
 
-        # 计算2D bbox
+        # 计算2D bbox（原始分辨率下）
         x1, y1 = uv.min(axis=0)
         x2, y2 = uv.max(axis=0)
 
-        # 检查是否在图像内
-        if x2 < 0 or y2 < 0 or x1 > img_w or y1 > img_h:
+        # 检查是否在原始图像内
+        if x2 < 0 or y2 < 0 or x1 > orig_w or y1 > orig_h:
             return None
 
-        # 裁剪到图像范围
+        # 裁剪到原始图像范围
         x1 = max(0, x1)
         y1 = max(0, y1)
-        x2 = min(img_w, x2)
-        y2 = min(img_h, y2)
+        x2 = min(orig_w, x2)
+        y2 = min(orig_h, y2)
+
+        # 如果指定了目标分辨率，进行缩放
+        if target_resolution is not None:
+            target_w, target_h = target_resolution
+            scale_x = target_w / orig_w
+            scale_y = target_h / orig_h
+            x1 *= scale_x
+            x2 *= scale_x
+            y1 *= scale_y
+            y2 *= scale_y
 
         return [float(x1), float(y1), float(x2), float(y2)]
 
@@ -304,6 +321,10 @@ class BboxOverlayProcessor:
         """
         annotated_frame = frame.copy()
 
+        # 获取视频帧的实际分辨率
+        frame_h, frame_w = frame.shape[:2]
+        target_resolution = (frame_w, frame_h)
+
         for obj in annotation.get('object', []):
             if obj['id'] == ego_vehicle_id:
                 continue
@@ -314,9 +335,10 @@ class BboxOverlayProcessor:
             yaw = obj['yaw']
             bbox_corners = get_3d_bbox_corners(center, size, yaw)
 
-            # 投影为2D bbox
+            # 投影为2D bbox（传入目标分辨率进行缩放）
             bbox_2d = self.project_bbox_to_2d(
-                bbox_corners, rotate_world2lidar, trans_world2lidar, cam_id
+                bbox_corners, rotate_world2lidar, trans_world2lidar, cam_id,
+                target_resolution=target_resolution
             )
 
             if bbox_2d is not None:
@@ -481,6 +503,13 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
                             str(annotation_path), vehicle_id
                         )
 
+                    # 第一帧打印调试信息
+                    if frame_idx == 0:
+                        num_objects = len(annotation.get('object', []))
+                        non_ego_objects = [o for o in annotation.get('object', []) if o['id'] != vehicle_id]
+                        print(f"    调试: 标注中有 {num_objects} 个物体, 排除自车后 {len(non_ego_objects)} 个")
+                        print(f"    视频分辨率: {width}x{height}")
+
                     # 处理帧
                     frame = processor.process_single_frame(
                         frame, annotation, rotate_world2lidar,
@@ -488,7 +517,8 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
                     )
                     processed_frames += 1
                 except Exception as e:
-                    pass  # 跳过无法处理的帧
+                    if frame_idx == 0:
+                        print(f"    ⚠️ 处理第一帧失败: {e}")
 
         out.write(frame)
         frame_idx += 1
