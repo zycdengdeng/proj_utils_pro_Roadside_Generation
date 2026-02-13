@@ -46,6 +46,9 @@ VEHICLE_CAMERAS = {
     7: {"name": "RN", "desc": "后视60°", "resolution": (1920, 1080)}
 }
 
+# 自车ID配置文件路径
+CARID_JSON_PATH = "/mnt/car_road_data_fix/support_info/carid.json"
+
 # 颜色配置（20个类别 + unknown）
 LABEL_COLORS = {
     "Car": [255, 0, 0],
@@ -107,20 +110,51 @@ def get_3d_bbox_corners(center, size, yaw):
     return corners_rotated
 
 
+def load_carid_mapping(carid_json_path=CARID_JSON_PATH):
+    """
+    加载carid.json，建立scene_id到自车ID的映射
+
+    Args:
+        carid_json_path: carid.json文件路径
+
+    Returns:
+        dict: {scene_id: nearest_carid} 映射
+    """
+    mapping = {}
+    try:
+        with open(carid_json_path, 'r') as f:
+            data = json.load(f)
+
+        for result in data.get('results', []):
+            clip_name = result.get('clip_name', '')
+            # 从clip_name提取scene_id，如 "001_car0325_road0327_t1" → "001"
+            match = re.match(r'^(\d+)_', clip_name)
+            if match:
+                scene_id = match.group(1)
+                nearest_carid = result.get('nearest_carid')
+                if nearest_carid is not None:
+                    mapping[scene_id] = nearest_carid
+
+        print(f"📋 已加载 {len(mapping)} 个场景的自车ID映射")
+    except Exception as e:
+        print(f"⚠️ 加载carid.json失败: {e}")
+
+    return mapping
+
+
 def parse_folder_name(folder_name):
     """
-    解析文件夹名称，提取 scene_id, vehicle_id, seg_num
+    解析文件夹名称，提取 scene_id, seg_num
 
-    格式: {scene_id}_id{vehicle_id}_seg{seg_num}
-    例如: 031_id041_seg01 → scene_id='031', vehicle_id=41, seg_num=1
+    格式: {scene_id}_seg{seg_num}
+    例如: 031_seg01 → scene_id='031', seg_num=1
     """
-    match = re.match(r'^(\d+)_id(\d+)_seg(\d+)$', folder_name)
+    match = re.match(r'^(\d+)_seg(\d+)$', folder_name)
     if match:
         scene_id = match.group(1)
-        vehicle_id = int(match.group(2))
-        seg_num = int(match.group(3))
-        return scene_id, vehicle_id, seg_num
-    return None, None, None
+        seg_num = int(match.group(2))
+        return scene_id, seg_num
+    return None, None
 
 
 def draw_2d_bbox(img, bbox_2d, color, thickness=2, label=None):
@@ -455,7 +489,7 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
 
 
 def process_folder(folder_path, output_root, processor, num_segs, frames_per_seg,
-                   frame_selection, fps=29):
+                   frame_selection, carid_mapping, fps=29):
     """
     处理单个文件夹（包含一个seg的所有相机视频）
 
@@ -466,19 +500,26 @@ def process_folder(folder_path, output_root, processor, num_segs, frames_per_seg
         num_segs: 总seg数
         frames_per_seg: 每seg帧数
         frame_selection: 帧选择方式
+        carid_mapping: scene_id到自车ID的映射
         fps: 输出视频帧率
     """
     folder_path = Path(folder_path)
     folder_name = folder_path.name
 
     # 解析文件夹名
-    scene_id, vehicle_id, seg_num = parse_folder_name(folder_name)
+    scene_id, seg_num = parse_folder_name(folder_name)
     if scene_id is None:
         print(f"⚠️ 无法解析文件夹名: {folder_name}")
         return False
 
+    # 从映射获取自车ID
+    vehicle_id = carid_mapping.get(scene_id)
+    if vehicle_id is None:
+        print(f"⚠️ 未找到场景 {scene_id} 的自车ID，跳过: {folder_name}")
+        return False
+
     print(f"\n📂 处理: {folder_name}")
-    print(f"   场景: {scene_id}, 车辆ID: {vehicle_id}, Seg: {seg_num}")
+    print(f"   场景: {scene_id}, 自车ID: {vehicle_id}, Seg: {seg_num}")
 
     # 创建输出目录
     output_folder = Path(output_root) / folder_name
@@ -545,18 +586,22 @@ def main():
         folders = []
         for item in input_dir.iterdir():
             if item.is_dir():
-                scene_id, vehicle_id, seg_num = parse_folder_name(item.name)
+                scene_id, seg_num = parse_folder_name(item.name)
                 if scene_id is not None:
                     folders.append(item)
         folders = sorted(folders)
 
     print(f"\n找到 {len(folders)} 个文件夹待处理")
 
+    # 加载自车ID映射
+    carid_mapping = load_carid_mapping()
+
     # 处理每个文件夹
     success_count = 0
     for folder in folders:
         if process_folder(folder, output_dir, processor, args.num_segs,
-                         args.frames_per_seg, args.frame_selection, args.fps):
+                         args.frames_per_seg, args.frame_selection,
+                         carid_mapping, args.fps):
             success_count += 1
 
     print(f"\n✅ 完成! 成功处理 {success_count}/{len(folders)} 个文件夹")

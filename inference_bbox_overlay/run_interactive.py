@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from inference_bbox_overlay.bbox_overlay import (
-    parse_folder_name, BboxOverlayProcessor, process_folder
+    parse_folder_name, load_carid_mapping, BboxOverlayProcessor, process_folder
 )
 import common_utils
 
@@ -48,19 +48,17 @@ def discover_folders(input_dir):
 
     for item in input_dir.iterdir():
         if item.is_dir():
-            scene_id, vehicle_id, seg_num = parse_folder_name(item.name)
+            scene_id, seg_num = parse_folder_name(item.name)
             if scene_id is not None:
                 folders.append({
                     'path': item,
                     'name': item.name,
                     'scene_id': scene_id,
-                    'vehicle_id': vehicle_id,
                     'seg_num': seg_num
                 })
-                key = f"{scene_id}_id{vehicle_id:03d}"
-                if key not in scenes:
-                    scenes[key] = []
-                scenes[key].append(item)
+                if scene_id not in scenes:
+                    scenes[scene_id] = []
+                scenes[scene_id].append(item)
 
     return sorted(folders, key=lambda x: x['name']), scenes
 
@@ -213,8 +211,8 @@ def main():
     folders, scenes = discover_folders(input_dir)
     if not folders:
         print(f"\n❌ 在 {input_dir} 中未找到符合格式的文件夹")
-        print("   格式要求: {scene_id}_id{vehicle_id}_seg{seg_num}")
-        print("   例如: 031_id041_seg01")
+        print("   格式要求: {scene_id}_seg{seg_num}")
+        print("   例如: 031_seg01")
         sys.exit(1)
 
     # 3. 选择场景
@@ -252,6 +250,9 @@ def main():
     vehicle_calib = common_utils.VEHICLE_CALIB_DIR
     processor = BboxOverlayProcessor(vehicle_calib)
 
+    # 加载自车ID映射
+    carid_mapping = load_carid_mapping()
+
     # 9. 处理每个文件夹
     success_count = 0
     total = len(selected_folders)
@@ -260,7 +261,7 @@ def main():
         print(f"\n[{i}/{total}] ", end="")
         try:
             if process_folder(folder, output_dir, processor, num_segs,
-                             frames_per_seg, frame_selection, fps):
+                             frames_per_seg, frame_selection, carid_mapping, fps):
                 success_count += 1
         except Exception as e:
             print(f"❌ 处理失败: {e}")
