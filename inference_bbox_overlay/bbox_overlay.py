@@ -409,22 +409,34 @@ def process_single_video(video_path, output_path, processor, scene_id, vehicle_i
         return False
 
     labels_dir = scene_paths['roadside_labels']
+    vehicle_images_dir = scene_paths['vehicle_images']
 
-    # 获取标注时间戳
-    label_files = sorted(Path(labels_dir).glob("*.json"))
-    annotation_timestamps = []
-    for lf in label_files:
-        match = re.search(r'(\d+)\.json$', lf.name)
-        if match:
-            annotation_timestamps.append(int(match.group(1)))
+    # 使用和 video maker 相同的逻辑：从车端图像目录获取 timestamp
+    # 这样确保 bbox_overlay 和 video maker 使用完全相同的帧
+    vehicle_timestamps = []
+    vehicle_images_path = Path(vehicle_images_dir)
+    if vehicle_images_path.exists():
+        for folder in vehicle_images_path.iterdir():
+            if folder.is_dir() and folder.name.isdigit():
+                vehicle_timestamps.append(int(folder.name))
+        vehicle_timestamps.sort()
 
-    if not annotation_timestamps:
-        print(f"  ❌ 未找到标注文件")
+    if not vehicle_timestamps:
+        # 回退到路侧标注 timestamp
+        print(f"  ⚠️ 车端图像目录为空，使用路侧标注timestamp")
+        label_files = sorted(Path(labels_dir).glob("*.json"))
+        for lf in label_files:
+            match = re.search(r'(\d+)\.json$', lf.name)
+            if match:
+                vehicle_timestamps.append(int(match.group(1)))
+
+    if not vehicle_timestamps:
+        print(f"  ❌ 未找到有效timestamp")
         return False
 
-    # 选取当前seg对应的时间戳
+    # 选取当前seg对应的时间戳（和 video maker 使用相同的中间选取逻辑）
     selected_timestamps = select_annotation_timestamps(
-        annotation_timestamps, frames_per_seg, num_segs,
+        vehicle_timestamps, frames_per_seg, num_segs,
         frames_per_seg, seg_num, frame_selection
     )
 
