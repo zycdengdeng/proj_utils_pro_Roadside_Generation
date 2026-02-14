@@ -68,8 +68,11 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
         print(f"❌ 场景 {scene_id} 路径验证失败，跳过")
         return
 
-    # 获取PCD文件列表
-    pcd_folder = Path(scene_paths['pcd'])
+    # 获取PCD文件列表（使用SLAM+动态物体合并点云）
+    pcd_folder = Path(scene_paths['slam_pcd'])
+    if not pcd_folder.exists():
+        print(f"❌ SLAM PCD目录不存在: {pcd_folder}")
+        return
     pcd_files = sorted(pcd_folder.glob("*.pcd"))
 
     if not pcd_files:

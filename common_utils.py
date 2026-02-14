@@ -164,10 +164,13 @@ def get_scene_paths(scene_id: str) -> Dict[str, str]:
     if not scene_root:
         return {}
 
+    scene_name = os.path.basename(scene_root)
+
     paths = {
         'root': scene_root,
-        'scene_name': os.path.basename(scene_root),
+        'scene_name': scene_name,
         'pcd': os.path.join(scene_root, 'road', 'lidar', 'merged_pcd'),
+        'slam_pcd': os.path.join(SUPPORT_INFO_DIR, 'dyn_stat_pcd', scene_name),  # SLAM+动态物体合并点云
         'roadside_images': os.path.join(scene_root, 'road', 'cameras'),
         'roadside_labels': os.path.join(scene_root, 'road_labels', 'interpolation_labels'),
         'vehicle_images': os.path.join(scene_root, 'car', 'images'),  # 车端GT图像
