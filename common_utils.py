@@ -585,36 +585,43 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
 
     if is_ego_mode:
         print(f"\n📁 步骤 2/3: 输入场景ID（自车模式，无需输入车辆ID）")
-        print("   直接按 Enter（不输入场景ID）结束输入")
+        print("   支持批量输入：逗号或空格分隔，如 001, 003, 007 或 001 003 007")
+        scene_batch_input = input("   请输入场景ID: ").strip()
 
-        while True:
-            print(f"\n   --- 第 {len(valid_scenes) + 1} 个场景 ---")
-            scene_input = input("   请输入场景ID（直接Enter结束）: ").strip()
+        if not scene_batch_input:
+            print("   ❌ 未输入任何场景ID")
+            return {}
 
-            if not scene_input:
-                if not valid_scenes:
-                    print("   ❌ 至少需要输入一个场景")
-                    continue
-                break
+        # 解析输入：支持逗号、空格、逗号+空格分隔
+        import re
+        scene_id_list = [s.strip() for s in re.split(r'[,\s]+', scene_batch_input) if s.strip()]
 
-            # 验证场景路径
+        # 逐个验证并查找自车ID
+        failed_scenes = []
+        for scene_input in scene_id_list:
+            # 补零到3位（如 1 → 001）
+            scene_input = scene_input.zfill(3)
+
             paths = get_scene_paths(scene_input)
             if not paths or not validate_scene_paths(paths):
-                print(f"   ✗ 场景 {scene_input}: 路径无效，请重新输入")
+                print(f"   ✗ 场景 {scene_input}: 路径无效，跳过")
+                failed_scenes.append(scene_input)
                 continue
 
-            print(f"   ✓ 场景 {scene_input}: {paths['scene_name']}")
-
-            # 自动查找自车ID
             ego_id = carid_mapping.get(scene_input)
             if ego_id is None:
-                print(f"   ⚠️  carid.json中未找到场景 {scene_input} 的自车ID")
-                fallback = input(f"   请手动输入车辆ID [默认45]: ").strip()
-                ego_id = int(fallback) if fallback else 45
+                print(f"   ⚠️  场景 {scene_input}: carid.json中未找到自车ID，使用默认值45")
+                ego_id = 45
 
             valid_scenes.append(scene_input)
             scene_vehicle_ids[scene_input] = [ego_id]
-            print(f"   ✓ 场景 {scene_input} → 自车ID: {ego_id}")
+            print(f"   ✓ 场景 {scene_input}: {paths['scene_name']} → 自车ID: {ego_id}")
+
+        if failed_scenes:
+            print(f"\n   ⚠️  {len(failed_scenes)} 个场景验证失败: {', '.join(failed_scenes)}")
+        if not valid_scenes:
+            print("   ❌ 没有有效场景")
+            return {}
 
     else:
         print(f"\n📁 步骤 2/3: 逐个输入场景和目标车辆ID")
