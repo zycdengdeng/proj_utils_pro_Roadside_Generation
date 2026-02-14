@@ -563,60 +563,110 @@ def interactive_input(batch_mode_enabled: bool = False) -> Dict:
     print("🚀 投影处理系统 - 统一交互界面")
     print("="*60)
 
-    # 1. 逐个输入场景及其车辆ID
-    print("\n📁 步骤 1/2: 逐个输入场景和目标车辆ID")
-    print("   说明：每次输入一个场景ID和该场景需要投影的车辆ID")
-    print("   直接按 Enter（不输入场景ID）结束输入")
+    # 1. 选择投影模式：自车/异车
+    print("\n🚗 步骤 1/3: 选择投影目标")
+    print("   1. 自车 - 自动从carid.json读取自车ID，只需输入场景号")
+    print("   2. 异车 - 手动输入场景号和目标车辆ID")
+    mode_input = input("   请选择模式 [1/2, 默认1]: ").strip() or "1"
+    is_ego_mode = (mode_input == "1")
 
+    if is_ego_mode:
+        print("   ✓ 自车模式：将自动从carid.json读取自车ID")
+        carid_mapping = load_carid_mapping()
+        if not carid_mapping:
+            print("   ❌ 无法加载carid.json，切换到异车模式")
+            is_ego_mode = False
+    else:
+        print("   ✓ 异车模式：需要手动输入车辆ID")
+
+    # 1. 逐个输入场景
     scene_vehicle_ids = {}  # {scene_id: [vehicle_id1, vehicle_id2, ...]}
     valid_scenes = []
 
-    while True:
-        print(f"\n   --- 第 {len(valid_scenes) + 1} 个场景 ---")
-        scene_input = input("   请输入场景ID（直接Enter结束）: ").strip()
+    if is_ego_mode:
+        print(f"\n📁 步骤 2/3: 输入场景ID（自车模式，无需输入车辆ID）")
+        print("   直接按 Enter（不输入场景ID）结束输入")
 
-        if not scene_input:
-            if not valid_scenes:
-                print("   ❌ 至少需要输入一个场景")
+        while True:
+            print(f"\n   --- 第 {len(valid_scenes) + 1} 个场景 ---")
+            scene_input = input("   请输入场景ID（直接Enter结束）: ").strip()
+
+            if not scene_input:
+                if not valid_scenes:
+                    print("   ❌ 至少需要输入一个场景")
+                    continue
+                break
+
+            # 验证场景路径
+            paths = get_scene_paths(scene_input)
+            if not paths or not validate_scene_paths(paths):
+                print(f"   ✗ 场景 {scene_input}: 路径无效，请重新输入")
                 continue
-            break
 
-        # 验证场景路径
-        paths = get_scene_paths(scene_input)
-        if not paths or not validate_scene_paths(paths):
-            print(f"   ✗ 场景 {scene_input}: 路径无效，请重新输入")
-            continue
+            print(f"   ✓ 场景 {scene_input}: {paths['scene_name']}")
 
-        print(f"   ✓ 场景 {scene_input}: {paths['scene_name']}")
+            # 自动查找自车ID
+            ego_id = carid_mapping.get(scene_input)
+            if ego_id is None:
+                print(f"   ⚠️  carid.json中未找到场景 {scene_input} 的自车ID")
+                fallback = input(f"   请手动输入车辆ID [默认45]: ").strip()
+                ego_id = int(fallback) if fallback else 45
 
-        # 输入该场景的车辆ID（支持多个）
-        print(f"   🚗 输入该场景需要投影的车辆ID（空格分隔，可输入多个）")
-        print(f"   示例：45 67 89")
-        vehicle_id_input = input(f"   请输入车辆ID [默认45]: ").strip()
+            valid_scenes.append(scene_input)
+            scene_vehicle_ids[scene_input] = [ego_id]
+            print(f"   ✓ 场景 {scene_input} → 自车ID: {ego_id}")
 
-        if not vehicle_id_input:
-            vehicle_ids = [45]
-        else:
-            vehicle_ids = []
-            for vid_str in vehicle_id_input.split():
-                try:
-                    vehicle_ids.append(int(vid_str))
-                except ValueError:
-                    print(f"   ⚠️  忽略无效输入: {vid_str}")
-            if not vehicle_ids:
-                print(f"   ⚠️  无有效ID，使用默认值 45")
+    else:
+        print(f"\n📁 步骤 2/3: 逐个输入场景和目标车辆ID")
+        print("   说明：每次输入一个场景ID和该场景需要投影的车辆ID")
+        print("   直接按 Enter（不输入场景ID）结束输入")
+
+        while True:
+            print(f"\n   --- 第 {len(valid_scenes) + 1} 个场景 ---")
+            scene_input = input("   请输入场景ID（直接Enter结束）: ").strip()
+
+            if not scene_input:
+                if not valid_scenes:
+                    print("   ❌ 至少需要输入一个场景")
+                    continue
+                break
+
+            # 验证场景路径
+            paths = get_scene_paths(scene_input)
+            if not paths or not validate_scene_paths(paths):
+                print(f"   ✗ 场景 {scene_input}: 路径无效，请重新输入")
+                continue
+
+            print(f"   ✓ 场景 {scene_input}: {paths['scene_name']}")
+
+            # 输入该场景的车辆ID（支持多个）
+            print(f"   🚗 输入该场景需要投影的车辆ID（空格分隔，可输入多个）")
+            print(f"   示例：45 67 89")
+            vehicle_id_input = input(f"   请输入车辆ID [默认45]: ").strip()
+
+            if not vehicle_id_input:
                 vehicle_ids = [45]
+            else:
+                vehicle_ids = []
+                for vid_str in vehicle_id_input.split():
+                    try:
+                        vehicle_ids.append(int(vid_str))
+                    except ValueError:
+                        print(f"   ⚠️  忽略无效输入: {vid_str}")
+                if not vehicle_ids:
+                    print(f"   ⚠️  无有效ID，使用默认值 45")
+                    vehicle_ids = [45]
 
-        valid_scenes.append(scene_input)
-        scene_vehicle_ids[scene_input] = vehicle_ids
-        print(f"   ✓ 场景 {scene_input} → 车辆ID: {vehicle_ids}")
+            valid_scenes.append(scene_input)
+            scene_vehicle_ids[scene_input] = vehicle_ids
+            print(f"   ✓ 场景 {scene_input} → 车辆ID: {vehicle_ids}")
 
     print(f"\n   ✓ 共 {len(valid_scenes)} 个场景:")
     for sid in valid_scenes:
         print(f"      场景 {sid} → 车辆ID: {scene_vehicle_ids[sid]}")
 
     # 2. 选择批次模式
-    print("\n📊 步骤 2/2: 选择批次模式")
+    print("\n📊 步骤 3/3: 选择批次模式")
     print("   选项：")
     print("     - all          : 处理所有文件（默认）")
     print("     - N            : 处理前N个（例如：10）")
