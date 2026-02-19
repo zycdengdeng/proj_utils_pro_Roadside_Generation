@@ -71,24 +71,36 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
         print(f"❌ 场景 {scene_id} 路径验证失败，跳过")
         return
 
-    # 获取标注文件列表
-    label_folder = Path(scene_paths['roadside_labels'])
-    annotation_files = sorted(label_folder.glob("*.json"))
+    # 获取PCD文件列表（使用SLAM+动态物体合并点云，与blur/depth保持一致）
+    pcd_folder = Path(scene_paths['slam_pcd'])
+    if not pcd_folder.exists():
+        print(f"❌ SLAM PCD目录不存在: {pcd_folder}")
+        return
+    pcd_files = sorted(pcd_folder.glob("*.pcd"))
 
-    if not annotation_files:
-        print(f"❌ 场景 {scene_id} 没有找到标注文件")
+    if not pcd_files:
+        print(f"❌ 场景 {scene_id} 没有找到PCD文件")
         return
 
     # 按时间戳排序
-    annotation_files = common_utils.sort_files_by_timestamp(annotation_files)
+    pcd_files = common_utils.sort_files_by_timestamp(pcd_files)
+
+    # 获取标注文件列表（用于匹配PCD时间戳）
+    label_folder = Path(scene_paths['roadside_labels'])
+    annotation_files = {
+        int(common_utils.extract_timestamp_from_filename(f)): f
+        for f in label_folder.glob("*.json")
+        if common_utils.extract_timestamp_from_filename(f) is not None
+    }
 
     print(f"\n📁 场景信息:")
     print(f"   名称: {scene_paths['scene_name']}")
+    print(f"   PCD文件数: {len(pcd_files)}")
     print(f"   标注文件数: {len(annotation_files)}")
 
-    # 批次选择
-    selected_files = common_utils.get_batch_files(annotation_files, config['batch_mode'])
-    common_utils.print_batch_info(selected_files, config['batch_mode'], len(annotation_files))
+    # 批次选择（基于PCD文件，与blur/depth一致）
+    selected_files = common_utils.get_batch_files(pcd_files, config['batch_mode'])
+    common_utils.print_batch_info(selected_files, config['batch_mode'], len(pcd_files))
 
     if not selected_files:
         print(f"❌ 没有选择任何文件")
@@ -96,11 +108,11 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
 
     # 诊断：检查时间戳范围
     print(f"\n🔍 时间戳诊断:")
-    annotation_timestamps = [common_utils.extract_timestamp_from_filename(f) for f in selected_files]
-    annotation_timestamps = [t for t in annotation_timestamps if t is not None]
-    if annotation_timestamps:
-        print(f"   标注时间戳范围: {min(annotation_timestamps):.0f} ~ {max(annotation_timestamps):.0f}")
-        print(f"   标注时间跨度: {(max(annotation_timestamps) - min(annotation_timestamps)) / 1000:.1f} 秒")
+    pcd_timestamps = [common_utils.extract_timestamp_from_filename(f) for f in selected_files]
+    pcd_timestamps = [t for t in pcd_timestamps if t is not None]
+    if pcd_timestamps:
+        print(f"   PCD时间戳范围: {min(pcd_timestamps):.0f} ~ {max(pcd_timestamps):.0f}")
+        print(f"   PCD时间跨度: {(max(pcd_timestamps) - min(pcd_timestamps)) / 1000:.1f} 秒")
 
     # 创建输出目录
     output_paths = common_utils.get_unified_output_paths(output_root, scene_id, 'hdmap')
@@ -108,12 +120,18 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
 
     print(f"\n📂 输出目录: {output_paths['root']}")
 
-    # 准备任务列表
+    # 准备任务列表（遍历PCD文件，查找对应标注）
     tasks = []
     output_root_path = Path(output_paths['root'])
-    for annotation_file in selected_files:
-        timestamp_ms = common_utils.extract_timestamp_from_filename(annotation_file)
+    for pcd_file in selected_files:
+        timestamp_ms = common_utils.extract_timestamp_from_filename(pcd_file)
         if timestamp_ms is None:
+            continue
+
+        # 查找对应时间戳的标注文件
+        annotation_file = annotation_files.get(int(timestamp_ms))
+        if annotation_file is None:
+            print(f"   ⚠️  时间戳 {int(timestamp_ms)} 无对应标注文件，跳过")
             continue
 
         output_frame_dir = output_root_path / str(int(timestamp_ms))

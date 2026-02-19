@@ -274,8 +274,19 @@ def draw_3d_bbox(img, corners_2d, corners_valid, color, thickness=2):
             cv2.line(img, pt1, pt2, color, thickness)
 
 
-def find_gt_image(gt_images_folder, camera_name, timestamp_ms):
-    """找到最接近的真值图片"""
+def find_gt_image(gt_images_folder, camera_name, timestamp_ms, tolerance_ms=200):
+    """
+    找到最接近的真值图片
+
+    Args:
+        gt_images_folder: GT图像根目录
+        camera_name: 相机名称
+        timestamp_ms: 目标时间戳（毫秒）
+        tolerance_ms: 容差（毫秒），超过此值返回None
+
+    Returns:
+        最接近的GT图像路径，如果超出容差返回None
+    """
     import re
 
     camera_folder = Path(gt_images_folder) / camera_name
@@ -299,6 +310,12 @@ def find_gt_image(gt_images_folder, camera_name, timestamp_ms):
             if diff < min_diff:
                 min_diff = diff
                 closest_file = jpg_file
+
+    # 检查时间差是否在容差范围内
+    if closest_file is not None:
+        min_diff_ms = min_diff / 1000  # 转换为毫秒
+        if min_diff_ms > tolerance_ms:
+            return None
 
     return closest_file
 
