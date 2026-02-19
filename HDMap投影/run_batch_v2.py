@@ -93,14 +93,22 @@ def process_single_scene(scene_id, vehicle_id, config, num_processes, threads_pe
         if common_utils.extract_timestamp_from_filename(f) is not None
     }
 
+    # 过滤：只保留有对应标注的PCD文件（确保middle_90能选出足够的有效帧）
+    valid_pcd_files = []
+    for pcd_file in pcd_files:
+        ts = common_utils.extract_timestamp_from_filename(pcd_file)
+        if ts is not None and int(ts) in annotation_files:
+            valid_pcd_files.append(pcd_file)
+
     print(f"\n📁 场景信息:")
     print(f"   名称: {scene_paths['scene_name']}")
     print(f"   PCD文件数: {len(pcd_files)}")
     print(f"   标注文件数: {len(annotation_files)}")
+    print(f"   有效PCD数: {len(valid_pcd_files)} (有对应标注)")
 
-    # 批次选择（基于PCD文件，与blur/depth一致）
-    selected_files = common_utils.get_batch_files(pcd_files, config['batch_mode'])
-    common_utils.print_batch_info(selected_files, config['batch_mode'], len(pcd_files))
+    # 批次选择（基于有效PCD文件，确保选出的都能处理）
+    selected_files = common_utils.get_batch_files(valid_pcd_files, config['batch_mode'])
+    common_utils.print_batch_info(selected_files, config['batch_mode'], len(valid_pcd_files))
 
     if not selected_files:
         print(f"❌ 没有选择任何文件")
