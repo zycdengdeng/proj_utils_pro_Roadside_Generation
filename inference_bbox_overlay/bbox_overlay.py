@@ -259,6 +259,55 @@ def draw_2d_bbox(img, bbox_2d, color, thickness=2, label=None):
         cv2.putText(img, label, (x1, y1 - 5), font, font_scale, (255, 255, 255), 1)
 
 
+def draw_3d_bbox(img, corners_2d, color, thickness=1, label=None):
+    """
+    绘制3D bbox（12条边）
+
+    Args:
+        img: 图像
+        corners_2d: 8个角点的2D坐标 [(x, y), ...] 或 None
+                    顺序: 0-3底面, 4-7顶面
+        color: 颜色 (B, G, R)
+        thickness: 线宽
+        label: 可选的标签文本
+    """
+    if corners_2d is None or len(corners_2d) < 8:
+        return
+
+    # 定义12条边的连接关系
+    # 底面4条边
+    edges_bottom = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    # 顶面4条边
+    edges_top = [(4, 5), (5, 6), (6, 7), (7, 4)]
+    # 垂直4条边
+    edges_vertical = [(0, 4), (1, 5), (2, 6), (3, 7)]
+
+    all_edges = edges_bottom + edges_top + edges_vertical
+
+    # 绘制所有边（只绘制两端点都有效的边）
+    valid_pts = []
+    for i, j in all_edges:
+        if corners_2d[i] is not None and corners_2d[j] is not None:
+            pt1 = (int(corners_2d[i][0]), int(corners_2d[i][1]))
+            pt2 = (int(corners_2d[j][0]), int(corners_2d[j][1]))
+            cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
+
+    # 收集有效点用于标签位置
+    for pt in corners_2d:
+        if pt is not None:
+            valid_pts.append((int(pt[0]), int(pt[1])))
+
+    # 绘制标签（在最高点附近）
+    if label and valid_pts:
+        # 找到最高的点（y最小）
+        min_y_pt = min(valid_pts, key=lambda p: p[1])
+        label_pos = (min_y_pt[0], max(0, min_y_pt[1] - 5))
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.4
+        cv2.putText(img, label, label_pos, font, font_scale, color, 1, cv2.LINE_AA)
+
+
 class BboxOverlayProcessor:
     def __init__(self, vehicle_calib_folder):
         """
@@ -382,10 +431,104 @@ class BboxOverlayProcessor:
 
         return [float(x1), float(y1), float(x2), float(y2)]
 
+    def project_bbox_corners_to_2d(self, bbox_corners_world, rotate_world2lidar,
+                                   trans_world2lidar, cam_id, target_resolution=None):
+        """
+        将3D bbox的8个角点投影到相机，返回2D坐标
+
+        Args:
+            bbox_corners_world: 3D bbox角点（世界坐标系），8个点
+            rotate_world2lidar: world2lidar旋转矩阵
+            trans_world2lidar: world2lidar平移向量
+            cam_id: 相机ID
+            target_resolution: 目标分辨率 (width, height)，用于缩放
+
+        Returns:
+            corners_2d: 8个角点的2D坐标列表 [(x, y), ...] or None
+            valid_mask: 每个角点是否有效的mask
+        """
+        cam_info = VEHICLE_CAMERAS[cam_id]
+        orig_w, orig_h = cam_info["resolution"]
+
+        K = self.camera_params[cam_id]['K']
+        D = self.camera_params[cam_id]['D']
+        R_cam2lidar = self.camera_poses[cam_id]['R']
+        t_cam2lidar = self.camera_poses[cam_id]['t']
+
+        # 世界坐标系 → LiDAR坐标系
+        points_lidar = common_utils.transform_points_to_lidar(
+            bbox_corners_world,
+            {'world2lidar': {
+                'rotation': rotate_world2lidar.flatten().tolist(),
+                'translation': trans_world2lidar.flatten().tolist()
+            }}
+        )
+
+        # LiDAR坐标系 → 相机坐标系
+        R_lidar2cam = R_cam2lidar.T
+        t_lidar2cam = -R_cam2lidar.T @ t_cam2lidar
+        points_cam = (R_lidar2cam @ points_lidar.T).T + t_lidar2cam
+
+        # 检查哪些点在相机前方
+        valid_mask = points_cam[:, 2] > 0.1
+        if not valid_mask.any():
+            return None, None
+
+        # 相机坐标系 → 图像坐标系
+        if cam_id in [2, 3, 4] and np.max(np.abs(D)) > 1:
+            new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                K, D[:4], (orig_w, orig_h), np.eye(3), balance=0.0
+            )
+        else:
+            new_K, _ = cv2.getOptimalNewCameraMatrix(K, D, (orig_w, orig_h), 0, (orig_w, orig_h))
+
+        # 投影所有点（包括无效的，后面会用mask过滤）
+        corners_2d = []
+        for i, pt_cam in enumerate(points_cam):
+            if pt_cam[2] > 0.1:
+                uv_h = new_K @ pt_cam
+                u = uv_h[0] / uv_h[2]
+                v = uv_h[1] / uv_h[2]
+
+                # 缩放到目标分辨率
+                if target_resolution is not None:
+                    target_w, target_h = target_resolution
+                    u = u * target_w / orig_w
+                    v = v * target_h / orig_h
+
+                corners_2d.append((u, v))
+            else:
+                corners_2d.append(None)
+
+        # 检查是否至少有部分点在图像内
+        valid_corners = [c for c in corners_2d if c is not None]
+        if not valid_corners:
+            return None, None
+
+        # 检查bbox中心是否大致在图像范围内
+        xs = [c[0] for c in valid_corners]
+        ys = [c[1] for c in valid_corners]
+        center_x = sum(xs) / len(xs)
+        center_y = sum(ys) / len(ys)
+
+        if target_resolution:
+            img_w, img_h = target_resolution
+        else:
+            img_w, img_h = orig_w, orig_h
+
+        # 如果中心点完全在图像外，跳过
+        margin = max(img_w, img_h) * 0.5
+        if center_x < -margin or center_x > img_w + margin:
+            return None, None
+        if center_y < -margin or center_y > img_h + margin:
+            return None, None
+
+        return corners_2d, valid_mask
+
     def process_single_frame(self, frame, annotation, rotate_world2lidar,
                              trans_world2lidar, cam_id, ego_vehicle_id):
         """
-        处理单帧：在帧上绘制所有物体的2D bbox
+        处理单帧：在帧上绘制所有物体的3D bbox
 
         Args:
             frame: 视频帧 (numpy array)
@@ -414,16 +557,16 @@ class BboxOverlayProcessor:
             yaw = obj['yaw']
             bbox_corners = get_3d_bbox_corners(center, size, yaw)
 
-            # 投影为2D bbox（传入目标分辨率进行缩放）
-            bbox_2d = self.project_bbox_to_2d(
+            # 投影8个角点到2D
+            corners_2d, valid_mask = self.project_bbox_corners_to_2d(
                 bbox_corners, rotate_world2lidar, trans_world2lidar, cam_id,
                 target_resolution=target_resolution
             )
 
-            if bbox_2d is not None:
+            if corners_2d is not None:
                 color = LABEL_COLORS.get(obj['label'], LABEL_COLORS['unknown'])
-                draw_2d_bbox(annotated_frame, bbox_2d, tuple(color),
-                            thickness=3, label=obj['label'])
+                draw_3d_bbox(annotated_frame, corners_2d, tuple(color),
+                            thickness=1, label=obj['label'])
 
         return annotated_frame
 
