@@ -431,7 +431,7 @@ def main():
     parser = argparse.ArgumentParser(description='批量更新 Transfer2 数据集的 caption')
 
     parser.add_argument('--base-dir', type=str,
-                        default='/mnt/zihanw/proj_utils_pro_Roadside/transfer_video_maker/output_full_data',
+                        default='/mnt/zihanw/proj_utils_pro_Roadside/transfer_video_maker/output',
                         help='数据集基础目录')
 
     parser.add_argument('--dataset', type=str,
