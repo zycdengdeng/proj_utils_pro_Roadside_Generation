@@ -153,8 +153,11 @@ def define_intersection_region():
     print("=" * 60)
 
     ref_positions = []  # (x, y, direction, entry/exit)
-    all_x = []
-    all_y = []
+    # 按方向分组收集坐标，用于计算最小边界
+    # 东西方向(W2E, E2W)的x范围定义路口x边界
+    # 南北方向(N2S, S2N)的y范围定义路口y边界
+    ew_x_ranges = []  # 每个东西方向车辆的 [x_min, x_max]
+    ns_y_ranges = []  # 每个南北方向车辆的 [y_min, y_max]
 
     for ref in REFERENCE_VEHICLES:
         scene_prefix = ref["scene_prefix"]
@@ -171,6 +174,9 @@ def define_intersection_region():
             print(f"  [SKIP] 无法获取标注文件")
             continue
 
+        entry_pos = None
+        exit_pos = None
+
         # 查找进路口时刻的位置
         entry_file, entry_diff = find_closest_label(label_files, entry_ts)
         if entry_file:
@@ -180,8 +186,6 @@ def define_intersection_region():
                 print(f"  进路口: ts={Path(entry_file).stem} (diff={entry_diff}ms), "
                       f"pos=({entry_pos[0]:.2f}, {entry_pos[1]:.2f})")
                 ref_positions.append((entry_pos[0], entry_pos[1], direction, "entry"))
-                all_x.append(entry_pos[0])
-                all_y.append(entry_pos[1])
             else:
                 print(f"  [WARN] 进路口标注中未找到车辆ID={vid}")
         else:
@@ -196,24 +200,49 @@ def define_intersection_region():
                 print(f"  出路口: ts={Path(exit_file).stem} (diff={exit_diff}ms), "
                       f"pos=({exit_pos[0]:.2f}, {exit_pos[1]:.2f})")
                 ref_positions.append((exit_pos[0], exit_pos[1], direction, "exit"))
-                all_x.append(exit_pos[0])
-                all_y.append(exit_pos[1])
             else:
                 print(f"  [WARN] 出路口标注中未找到车辆ID={vid}")
         else:
             print(f"  [WARN] 未找到出路口时间戳对应的标注文件")
 
-    if len(all_x) < 4:
-        print(f"\n[ERROR] 参考点不足（仅{len(all_x)}个），无法定义区域")
+        # 按方向分组
+        if entry_pos and exit_pos:
+            if direction in ("W2E", "E2W"):
+                ew_x_ranges.append([min(entry_pos[0], exit_pos[0]),
+                                    max(entry_pos[0], exit_pos[0])])
+            elif direction in ("N2S", "S2N"):
+                ns_y_ranges.append([min(entry_pos[1], exit_pos[1]),
+                                    max(entry_pos[1], exit_pos[1])])
+
+    if len(ew_x_ranges) < 1 or len(ns_y_ranges) < 1:
+        print(f"\n[ERROR] 参考数据不足，无法定义区域")
         return None, ref_positions
 
-    # 从所有进出路口位置计算矩形区域
+    # 最小边界：取各方向x/y范围的交集
+    # x边界：东西方向车辆x范围的交集 → max(所有x_min), min(所有x_max)
+    # y边界：南北方向车辆y范围的交集 → max(所有y_min), min(所有y_max)
+    x_min = max(r[0] for r in ew_x_ranges)
+    x_max = min(r[1] for r in ew_x_ranges)
+    y_min = max(r[0] for r in ns_y_ranges)
+    y_max = min(r[1] for r in ns_y_ranges)
+
+    if x_min >= x_max or y_min >= y_max:
+        print(f"\n[ERROR] 最小边界交集为空！")
+        print(f"  东西方向x范围: {ew_x_ranges}")
+        print(f"  南北方向y范围: {ns_y_ranges}")
+        print(f"  交集: x[{x_min:.2f}, {x_max:.2f}], y[{y_min:.2f}, {y_max:.2f}]")
+        print(f"  请检查参考车辆的进出路口位置是否正确")
+        return None, ref_positions
+
     region = {
-        "x_min": min(all_x),
-        "x_max": max(all_x),
-        "y_min": min(all_y),
-        "y_max": max(all_y),
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
     }
+
+    print(f"\n  东西方向x范围: {['[{:.2f}, {:.2f}]'.format(r[0], r[1]) for r in ew_x_ranges]}")
+    print(f"  南北方向y范围: {['[{:.2f}, {:.2f}]'.format(r[0], r[1]) for r in ns_y_ranges]}")
 
     print(f"\n{'='*60}")
     print(f"路口矩形区域:")
