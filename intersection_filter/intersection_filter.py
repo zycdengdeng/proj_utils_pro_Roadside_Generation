@@ -319,13 +319,14 @@ def segment_track(frames, segment_length=SEGMENT_LENGTH):
     return segments
 
 
-def filter_vehicles_in_region(region, scene_prefixes=None):
+def filter_vehicles_in_region(region, scene_prefixes=None, segment_length=SEGMENT_LENGTH):
     """
     筛选所有场景中区域内的车辆，并生成29帧片段
 
     Args:
         region: 矩形区域 dict
         scene_prefixes: 要处理的场景列表，None则处理所有
+        segment_length: 每个片段的帧数
 
     Returns:
         all_segments: list of dicts, each containing segment info
@@ -355,10 +356,10 @@ def filter_vehicles_in_region(region, scene_prefixes=None):
         scene_tracks_viz = {}
         for vid, frames in tracks.items():
             n_frames = len(frames)
-            segments = segment_track(frames, SEGMENT_LENGTH)
+            segments = segment_track(frames, segment_length)
 
             if segments:
-                print(f"  车辆 {vid}: {n_frames} 帧在区域内 -> {len(segments)} 个{SEGMENT_LENGTH}帧片段")
+                print(f"  车辆 {vid}: {n_frames} 帧在区域内 -> {len(segments)} 个{segment_length}帧片段")
                 for seg_idx, seg in enumerate(segments):
                     ts_start = seg[0][0]
                     ts_end = seg[-1][0]
@@ -373,7 +374,7 @@ def filter_vehicles_in_region(region, scene_prefixes=None):
                         "label_files": [f[3] for f in seg],
                     })
             else:
-                print(f"  车辆 {vid}: {n_frames} 帧在区域内 (不足{SEGMENT_LENGTH}帧，丢弃)")
+                print(f"  车辆 {vid}: {n_frames} 帧在区域内 (不足{segment_length}帧，丢弃)")
 
             # 保存完整轨迹用于可视化（包括不足29帧的）
             scene_tracks_viz[vid] = [(f[0], f[1], f[2]) for f in frames]
@@ -631,8 +632,7 @@ def main():
                         help=f"每个片段的帧数（默认{SEGMENT_LENGTH}）")
     args = parser.parse_args()
 
-    global SEGMENT_LENGTH
-    SEGMENT_LENGTH = args.segment_length
+    segment_length = args.segment_length
 
     region = None
     ref_positions = None
@@ -664,7 +664,7 @@ def main():
             print(f"从文件加载区域定义: {region_file}")
 
         all_segments, tracks_in_region = filter_vehicles_in_region(
-            region, scene_prefixes=args.scenes
+            region, scene_prefixes=args.scenes, segment_length=segment_length
         )
 
     # Step 3: BEV可视化
