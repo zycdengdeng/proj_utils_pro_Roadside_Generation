@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 路口区域筛选工具
-根据采集车进出路口的位置定义四边形区域，筛选区域内车辆轨迹，生成29帧片段
+根据采集车进出路口的位置定义矩形区域，筛选区域内车辆轨迹，生成29帧片段
 
 Usage:
     python intersection_filter.py --step define    # Step 1: 定义区域并BEV可视化
@@ -137,72 +137,24 @@ def find_vehicle_in_label(label_data, vehicle_id):
 
 
 # ============================================================
-# 几何工具函数
-# ============================================================
-
-def _line_intersection(p1, p2, p3, p4):
-    """
-    计算直线(p1-p2)与直线(p3-p4)的交点
-    返回 (x, y) 或 None（平行时）
-    """
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = p3
-    x4, y4 = p4
-
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-10:
-        return None  # 平行
-
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    ix = x1 + t * (x2 - x1)
-    iy = y1 + t * (y2 - y1)
-    return (ix, iy)
-
-
-def _point_in_polygon(x, y, vertices):
-    """
-    射线法判断点(x,y)是否在多边形vertices内
-    vertices: [(x0,y0), (x1,y1), ...] 按顺序排列的顶点
-    """
-    n = len(vertices)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = vertices[i]
-        xj, yj = vertices[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
-
-
-# ============================================================
-# Step 1: 定义路口四边形区域
+# Step 1: 定义路口矩形区域
 # ============================================================
 
 def define_intersection_region():
     """
-    从四个方向的参考车辆进出路口位置，定义路口四边形区域。
-
-    同侧的两个参考点连成边界线：
-    - 西边界: W2E入口 + E2W出口
-    - 东边界: W2E出口 + E2W入口
-    - 北边界: N2S入口 + S2N出口
-    - 南边界: N2S出口 + S2N入口
-    四条线两两相交得到四个角点，构成四边形。
+    从四个方向的参考车辆位置，取所有8个点的min/max定义路口矩形区域
 
     Returns:
-        region: dict with key "vertices" -> [[x,y], ...] (4个顶点，逆时针)
+        region: dict with keys x_min, x_max, y_min, y_max
         ref_positions: list of (x, y, direction, type) for visualization
     """
     print("\n" + "=" * 60)
-    print("Step 1: 定义路口四边形区域")
+    print("Step 1: 定义路口矩形区域")
     print("=" * 60)
 
     ref_positions = []  # (x, y, direction, entry/exit)
-    # 按 (direction, entry/exit) 收集位置
-    side_points = {}  # key: (direction, "entry"/"exit") -> (x, y)
+    all_x = []
+    all_y = []
 
     for ref in REFERENCE_VEHICLES:
         scene_prefix = ref["scene_prefix"]
@@ -228,7 +180,8 @@ def define_intersection_region():
                 print(f"  进路口: ts={Path(entry_file).stem} (diff={entry_diff}ms), "
                       f"pos=({entry_pos[0]:.2f}, {entry_pos[1]:.2f})")
                 ref_positions.append((entry_pos[0], entry_pos[1], direction, "entry"))
-                side_points[(direction, "entry")] = entry_pos
+                all_x.append(entry_pos[0])
+                all_y.append(entry_pos[1])
             else:
                 print(f"  [WARN] 进路口标注中未找到车辆ID={vid}")
         else:
@@ -243,75 +196,31 @@ def define_intersection_region():
                 print(f"  出路口: ts={Path(exit_file).stem} (diff={exit_diff}ms), "
                       f"pos=({exit_pos[0]:.2f}, {exit_pos[1]:.2f})")
                 ref_positions.append((exit_pos[0], exit_pos[1], direction, "exit"))
-                side_points[(direction, "exit")] = exit_pos
+                all_x.append(exit_pos[0])
+                all_y.append(exit_pos[1])
             else:
                 print(f"  [WARN] 出路口标注中未找到车辆ID={vid}")
         else:
             print(f"  [WARN] 未找到出路口时间戳对应的标注文件")
 
-    # 需要8个参考点来定义4条边界线
-    required_keys = [
-        ("W2E", "entry"), ("W2E", "exit"),
-        ("E2W", "entry"), ("E2W", "exit"),
-        ("N2S", "entry"), ("N2S", "exit"),
-        ("S2N", "entry"), ("S2N", "exit"),
-    ]
-    missing = [k for k in required_keys if k not in side_points]
-    if missing:
-        print(f"\n[ERROR] 缺少参考点: {missing}")
+    if len(all_x) < 4:
+        print(f"\n[ERROR] 参考点不足（仅{len(all_x)}个），无法定义区域")
         return None, ref_positions
 
-    # 定义四条边界线（同侧的两个参考点）
-    # 西边界线: W2E入口(西侧进入) + E2W出口(西侧离开)
-    west_p1 = side_points[("W2E", "entry")]
-    west_p2 = side_points[("E2W", "exit")]
-    # 东边界线: W2E出口(东侧离开) + E2W入口(东侧进入)
-    east_p1 = side_points[("W2E", "exit")]
-    east_p2 = side_points[("E2W", "entry")]
-    # 北边界线: N2S入口(北侧进入) + S2N出口(北侧离开)
-    north_p1 = side_points[("N2S", "entry")]
-    north_p2 = side_points[("S2N", "exit")]
-    # 南边界线: N2S出口(南侧离开) + S2N入口(南侧进入)
-    south_p1 = side_points[("N2S", "exit")]
-    south_p2 = side_points[("S2N", "entry")]
-
-    print(f"\n边界线:")
-    print(f"  西: ({west_p1[0]:.2f},{west_p1[1]:.2f}) - ({west_p2[0]:.2f},{west_p2[1]:.2f})")
-    print(f"  东: ({east_p1[0]:.2f},{east_p1[1]:.2f}) - ({east_p2[0]:.2f},{east_p2[1]:.2f})")
-    print(f"  北: ({north_p1[0]:.2f},{north_p1[1]:.2f}) - ({north_p2[0]:.2f},{north_p2[1]:.2f})")
-    print(f"  南: ({south_p1[0]:.2f},{south_p1[1]:.2f}) - ({south_p2[0]:.2f},{south_p2[1]:.2f})")
-
-    # 计算四个角点（边界线的交点）
-    nw = _line_intersection(north_p1, north_p2, west_p1, west_p2)
-    ne = _line_intersection(north_p1, north_p2, east_p1, east_p2)
-    se = _line_intersection(south_p1, south_p2, east_p1, east_p2)
-    sw = _line_intersection(south_p1, south_p2, west_p1, west_p2)
-
-    corners = {"NW": nw, "NE": ne, "SE": se, "SW": sw}
-    for name, pt in corners.items():
-        if pt is None:
-            print(f"\n[ERROR] {name}角点计算失败（边界线平行）")
-            return None, ref_positions
-
-    # 逆时针排列顶点: SW -> SE -> NE -> NW
-    vertices = [list(sw), list(se), list(ne), list(nw)]
-
-    region = {"vertices": vertices}
+    # 从所有进出路口位置计算矩形区域（取min/max）
+    region = {
+        "x_min": min(all_x),
+        "x_max": max(all_x),
+        "y_min": min(all_y),
+        "y_max": max(all_y),
+    }
 
     print(f"\n{'='*60}")
-    print(f"路口四边形区域（顶点）:")
-    labels = ["SW", "SE", "NE", "NW"]
-    for label, v in zip(labels, vertices):
-        print(f"  {label}: ({v[0]:.2f}, {v[1]:.2f})")
-    # 计算面积（Shoelace公式）
-    n = len(vertices)
-    area = 0
-    for i in range(n):
-        j = (i + 1) % n
-        area += vertices[i][0] * vertices[j][1]
-        area -= vertices[j][0] * vertices[i][1]
-    area = abs(area) / 2
-    print(f"  面积: {area:.1f} m²")
+    print(f"路口矩形区域:")
+    print(f"  X: [{region['x_min']:.2f}, {region['x_max']:.2f}]  "
+          f"宽度: {region['x_max'] - region['x_min']:.2f}m")
+    print(f"  Y: [{region['y_min']:.2f}, {region['y_max']:.2f}]  "
+          f"高度: {region['y_max'] - region['y_min']:.2f}m")
     print(f"{'='*60}")
 
     # 保存区域定义
@@ -323,12 +232,6 @@ def define_intersection_region():
             {"x": p[0], "y": p[1], "direction": p[2], "type": p[3]}
             for p in ref_positions
         ],
-        "boundary_lines": {
-            "west": [list(west_p1), list(west_p2)],
-            "east": [list(east_p1), list(east_p2)],
-            "north": [list(north_p1), list(north_p2)],
-            "south": [list(south_p1), list(south_p2)],
-        },
         "reference_vehicles": REFERENCE_VEHICLES,
     }
     with open(region_file, 'w') as f:
@@ -343,9 +246,9 @@ def define_intersection_region():
 # ============================================================
 
 def is_in_region(x, y, region):
-    """判断点是否在四边形区域内（BEV俯视，不考虑z轴）"""
-    vertices = [tuple(v) for v in region["vertices"]]
-    return _point_in_polygon(x, y, vertices)
+    """判断点是否在矩形区域内（BEV俯视，不考虑z轴）"""
+    return (region["x_min"] <= x <= region["x_max"] and
+            region["y_min"] <= y <= region["y_max"])
 
 
 def track_vehicles_in_scene(scene_prefix, region):
@@ -609,13 +512,16 @@ def visualize_bev(region, ref_positions, tracks_in_region=None,
                                    c='gray', s=0.1, alpha=0.3, rasterized=True)
                         print(f"  点云点数: {len(points)}")
 
-    # --- 画四边形区域 ---
-    vertices = region["vertices"]
-    polygon = patches.Polygon(vertices, closed=True,
-                               linewidth=3, edgecolor='red',
-                               facecolor='red', alpha=0.1,
-                               label='Intersection Region')
-    ax.add_patch(polygon)
+    # --- 画矩形区域 ---
+    rx = region["x_min"]
+    ry = region["y_min"]
+    rw = region["x_max"] - region["x_min"]
+    rh = region["y_max"] - region["y_min"]
+    rect = patches.Rectangle((rx, ry), rw, rh,
+                              linewidth=3, edgecolor='red',
+                              facecolor='red', alpha=0.1,
+                              label='Intersection Region')
+    ax.add_patch(rect)
 
     # --- 画参考车辆位置 ---
     direction_colors = {
@@ -671,11 +577,10 @@ def visualize_bev(region, ref_positions, tracks_in_region=None,
 
     # --- 图例和标注 ---
     # 手动添加图例
-    verts = region["vertices"]
-    verts_str = " ".join([f"({v[0]:.0f},{v[1]:.0f})" for v in verts])
     legend_elements = [
         patches.Patch(facecolor='red', alpha=0.2, edgecolor='red', linewidth=2,
-                      label=f'Region: {verts_str}'),
+                      label=f'Region: x[{region["x_min"]:.1f},{region["x_max"]:.1f}] '
+                            f'y[{region["y_min"]:.1f},{region["y_max"]:.1f}]'),
     ]
     for direction, color in direction_colors.items():
         desc = direction_descs.get(direction, direction)
@@ -686,17 +591,14 @@ def visualize_bev(region, ref_positions, tracks_in_region=None,
 
     ax.legend(handles=legend_elements, loc='upper left', fontsize=9)
 
-    # 设置坐标轴：基于多边形顶点范围
-    vx = [v[0] for v in verts]
-    vy = [v[1] for v in verts]
-    rx_min, rx_max = min(vx), max(vx)
-    ry_min, ry_max = min(vy), max(vy)
-    rw = rx_max - rx_min
-    rh = ry_max - ry_min
-    margin = max(rw * 0.5, rh * 0.5, 30)
+    # 设置坐标轴
+    # 自动范围：以区域为中心，扩展一定比例
+    margin_x = rw * 0.5
+    margin_y = rh * 0.5
+    margin = max(margin_x, margin_y, 30)  # 至少30m margin
 
-    ax.set_xlim(rx_min - margin, rx_max + margin)
-    ax.set_ylim(ry_min - margin, ry_max + margin)
+    ax.set_xlim(region["x_min"] - margin, region["x_max"] + margin)
+    ax.set_ylim(region["y_min"] - margin, region["y_max"] + margin)
     ax.set_aspect('equal')
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
