@@ -1,39 +1,53 @@
-### 这里是专门给老年痴呆写的readme，老奶奶看了都用的明白
+## 完整流程（3步）
 
-## 主要流程： 启动环境conda activate zihanw ->控制帧图像生成方法 -> 控制头视频生成方法 -> caption替换方法
-## 控制帧图像生成方法
+```
+conda activate zihanw
+```
 
-/mnt/zihanw/proj_utils_pro/run_interactive.sh
-可用的投影项目:
-  1) basic        - 基本路侧merge激光雷达点云投影
-  2) blur         - blur投影（路侧相机着色merge激光雷达点云投影）
-  3) blur_dense   - blur稠密化投影（路端merge点云投影完规则稠密化）
-  4) depth        - depth投影（merge点云生成深度）
-  5) depth_dense  - depth稠密化投影（merge点云生成深度后规则稠密化）
-  6) hdmap        - HDMap投影（3D→2D bbox）
+### 第1步：Segment Pipeline（生成 pose + 朝向 + 标注）
 
-  7) batch        - 批量处理（选择多个项目串行执行）
+```bash
+python -m segment_pipeline.segment_pipeline --interactive
+```
 
-  注意输入：选项里有auto,直接输入auto
-  如果是线程数 gpu 直接enter，带有默认....直接enter
+- 选场景 → 选车辆 → 选投影类型
+- 自动生成 `pose.csv`、`direction.json`（朝向）、ego坐标系标注
+- 可选同时跑投影（basic/blur/depth/hdmap）
 
-1. 在任意的目录下都可以执行主脚本，直接执行绝对路径，这得益于主要的 .py 和 .sh 脚本都使用 Path(__file__).resolve().parent，自动解析绝对路径和父目录
-2. 运行我们的主脚本 run_interactive.sh，会在terminal给很多选项。 1-6 是某个功能的实现指令。 7 是批量处理多个指令，一般来讲选7就可以。
-3. 选了 7 之后就可以开始多选功能，如果你需要 blur + depth + HDMap 那就选择 2 4 6. 
-4. 填入场景，直接填001-089的编号就可以，他自己可以找到对应的地址，运行配置直接enter使用默认，跑就行了
-5. 但是注意，他们跑完除了HDMap其余的任务之后，还需要你填写HDMap的运行config，这次会多填写一个自车ID，直接选择auto就可以了。
-6. 生成的是逐帧的图片，分别在自己的子功能文件夹下，按场景分类的。每一帧都可以验证质量。
+### 第2步：生成控制头视频 + caption
 
-## 控制头视频生成方法
-这步的时候一开始要选7
-1. 脚本在这里 /mnt/zihanw/proj_utils_pro/transfer_video_maker/generate_videos.sh
-2. 一开始的菜单同上，一般来讲直接选Batch就可以，然后选择自己想要的功能。
-3. 关于每个seg的帧数，seg的数量和视频帧率这些默认值是符合cosmos post training demo的配置，默认1280 720p，生成在/mnt/zihanw/proj_utils_pro/transfer_video_maker/output，主要分类依据不是场景号，是根据transfer控制头分类的。
+```bash
+bash transfer_video_maker/generate_videos.sh
+```
 
-## caption替换方法
-1. 执行脚本 /mnt/zihanw/proj_utils_pro/transfer_video_maker/generate_transfer2_videos.py
-2. 如果是替换单个头，就选单个，然后选择适应这个头的选项，每个选项都说明自己是哪个控制头的caption
-3. 如果替换多个头，直接选替换全部，然后会多一个自适应匹配的选项，选那个就可以
-4. 想替换预设caption直接改py脚本里面的txt就可以了
+- 选项目类型（或选7批量）→ 输入场景号 → 其余参数直接回车用默认
+- 默认配置：21帧/seg、4个seg、10fps、1280x720
+- 输出在 `transfer_video_maker/output/`，按控制头类型分目录
 
-### 仅限于学习交流，商业用途可以给我磕头笑鼠
+### 第3步：caption 批量替换（含朝向）
+
+```bash
+python transfer_video_maker/caption一键修理/update_captions.py
+```
+
+- 自动从第1步生成的 `direction.json` 读取朝向（west to east / east to west / ...）
+- 选数据集 → 选模板（或选自动匹配）→ 预览 → 确认
+- caption 格式：`"{视角}. The ego vehicle is traveling from {朝向}. {场景描述}"`
+
+**朝向怎么对应上的**：caption文件名 `004_id45_seg01.json` → 自动找 `segment_pipeline/output/scene004/vehicle45_seg01/direction.json`
+
+---
+
+## 单独跑投影（不走 segment_pipeline）
+
+```bash
+bash run_interactive.sh
+```
+
+- 选1-6单个投影，或选7批量（如输入 `2 4 6` 同时跑 blur + depth + hdmap）
+- 输入场景号（如 `004`）→ 其余参数直接回车用默认
+- hdmap 的自车ID选 `auto`
+
+## 要改 caption 模板？
+
+直接改 `transfer_video_maker/caption一键修理/update_captions.py` 里的 `SCENE_DESCRIPTION` 和 `PRESET_TEMPLATES`。

@@ -170,8 +170,55 @@ def process_single_segment(segment, ref_vectors, output_dir, projection_types=No
 # 交互式选择
 # ============================================================
 
+def _select_vehicles_for_scene(scene_id, scene_segs):
+    """
+    为单个场景选择车辆
+
+    Args:
+        scene_id: 场景ID
+        scene_segs: 该场景下的所有 segments
+
+    Returns:
+        选中的 segments 列表
+    """
+    vehicle_ids = sorted(set(s['vehicle_id'] for s in scene_segs))
+
+    if len(vehicle_ids) == 1:
+        print(f"  场景 {scene_id}: 仅有车辆 {vehicle_ids[0]}, 自动选中")
+        return scene_segs
+
+    print(f"\n  场景 {scene_id} 中的车辆:")
+    for i, vid in enumerate(vehicle_ids, 1):
+        count = sum(1 for s in scene_segs if s['vehicle_id'] == vid)
+        print(f"    {i}) 车辆 {vid} ({count} 个 segments)")
+    print(f"    0) 全部车辆")
+
+    vid_choice = input(f"  选择车辆 (可多选, 如 1 3 或 1,3) [0=全部]: ").strip()
+
+    if vid_choice == '' or vid_choice == '0':
+        return scene_segs
+
+    # 解析多选
+    vid_choice = vid_choice.replace(',', ' ')
+    selected_segs = []
+    for token in vid_choice.split():
+        try:
+            vid_idx = int(token) - 1
+            if 0 <= vid_idx < len(vehicle_ids):
+                target_vid = vehicle_ids[vid_idx]
+                selected_segs.extend(s for s in scene_segs if s['vehicle_id'] == target_vid)
+        except ValueError:
+            pass
+
+    if selected_segs:
+        return selected_segs
+
+    print("  无效输入, 选中该场景全部车辆")
+    return scene_segs
+
+
 def interactive_select(segments):
-    """交互式选择要处理的 segments"""
+    """交互式选择要处理的 segments（支持多场景 + 每场景选车辆）"""
     print("\n" + "="*60)
     print("Segment Pipeline - 交互式选择")
     print("="*60)
@@ -185,7 +232,7 @@ def interactive_select(segments):
         scenes[scene_id].append(seg)
 
     scene_ids = sorted(scenes.keys())
-    print(f"\n共 {len(segments)} 个 segments, {len(scene_ids)} 个场景:")
+    print(f"\n共 {len(segments)} 个 segments, {len(scene_ids)} 个场景:\n")
     for i, sid in enumerate(scene_ids, 1):
         segs = scenes[sid]
         vehicle_ids = sorted(set(s['vehicle_id'] for s in segs))
@@ -194,8 +241,9 @@ def interactive_select(segments):
 
     print(f"\n  0) 全部处理 ({len(segments)} 个)")
     print(f"  q) 退出")
+    print(f"\n  提示: 可多选场景, 用空格或逗号分隔, 如 \"1 3 5\" 或 \"1,3,5\"")
 
-    choice = input("\n请选择场景 [0]: ").strip()
+    choice = input("\n请选择场景: ").strip()
 
     if choice.lower() == 'q':
         return []
@@ -203,37 +251,42 @@ def interactive_select(segments):
     if choice == '' or choice == '0':
         return segments
 
-    try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(scene_ids):
-            selected_scene = scene_ids[idx]
-            scene_segs = scenes[selected_scene]
+    # 解析多选场景
+    choice = choice.replace(',', ' ')
+    selected_scene_ids = []
+    for token in choice.split():
+        try:
+            idx = int(token) - 1
+            if 0 <= idx < len(scene_ids):
+                selected_scene_ids.append(scene_ids[idx])
+            else:
+                print(f"  跳过无效编号: {token}")
+        except ValueError:
+            print(f"  跳过无效输入: {token}")
 
-            vehicle_ids = sorted(set(s['vehicle_id'] for s in scene_segs))
-            if len(vehicle_ids) > 1:
-                print(f"\n场景 {selected_scene} 中的车辆:")
-                for i, vid in enumerate(vehicle_ids, 1):
-                    count = sum(1 for s in scene_segs if s['vehicle_id'] == vid)
-                    print(f"  {i}) 车辆 {vid} ({count} 个 segments)")
-                print(f"  0) 全部")
+    if not selected_scene_ids:
+        print("无效输入, 处理全部")
+        return segments
 
-                vid_choice = input("\n请选择车辆 [0]: ").strip()
-                if vid_choice == '' or vid_choice == '0':
-                    return scene_segs
-                try:
-                    vid_idx = int(vid_choice) - 1
-                    if 0 <= vid_idx < len(vehicle_ids):
-                        target_vid = vehicle_ids[vid_idx]
-                        return [s for s in scene_segs if s['vehicle_id'] == target_vid]
-                except ValueError:
-                    pass
+    # 去重并保持顺序
+    seen = set()
+    unique_scene_ids = []
+    for sid in selected_scene_ids:
+        if sid not in seen:
+            seen.add(sid)
+            unique_scene_ids.append(sid)
+    selected_scene_ids = unique_scene_ids
 
-            return scene_segs
-    except ValueError:
-        pass
+    print(f"\n已选场景: {', '.join(selected_scene_ids)}")
 
-    print("无效输入，处理全部")
-    return segments
+    # 对每个场景选择车辆
+    all_selected = []
+    for sid in selected_scene_ids:
+        scene_segs = scenes[sid]
+        selected = _select_vehicles_for_scene(sid, scene_segs)
+        all_selected.extend(selected)
+
+    return all_selected
 
 
 # ============================================================
