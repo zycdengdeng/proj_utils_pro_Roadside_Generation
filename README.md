@@ -1,4 +1,4 @@
-## 完整流程（3步）
+## 完整流程（2步）
 
 ```
 conda activate zihanw
@@ -53,4 +53,6 @@ bash run_interactive.sh
 
 ## 要改 caption 模板？
 
-直接改 `transfer_video_maker/caption一键修理/update_captions.py` 里的 `SCENE_DESCRIPTION` 和 `PRESET_TEMPLATES`。
+改 `transfer_video_maker/generate_transfer2_videos.py` 里的 `SCENE_DESCRIPTION`（生成时直接写入）。
+
+如需事后批量替换已有 caption，用 `transfer_video_maker/caption一键修理/update_captions.py`。
