@@ -12,31 +12,40 @@ from pathlib import Path
 from .ego_transform import get_vehicle_transform
 
 
-def transform_object_to_ego_frame(obj, ego_rotate_mat, ego_trans, ego_yaw):
+def transform_object_to_ego_frame(obj, R_world2lidar, t_world2lidar):
     """
     将单个物体从世界坐标系转换到 ego LiDAR 坐标系
 
+    位置: 通过完整的 world2lidar 旋转矩阵 + 平移
+    朝向: 将物体朝向向量通过 R_world2lidar 旋转后提取 yaw/roll/pitch
+
     Args:
         obj: 标注对象 dict (世界坐标系)
-        ego_rotate_mat: world2lidar 旋转矩阵 (3,3)
-        ego_trans: world2lidar 平移向量 (3,1)
-        ego_yaw: ego 车辆世界朝向 yaw
+        R_world2lidar: world2lidar 旋转矩阵 (3,3)
+        t_world2lidar: world2lidar 平移向量 (3,1)
 
     Returns:
         obj_ego: 转换后的标注对象 dict (ego LiDAR 坐标系)
     """
-    # 物体世界坐标
+    # 位置变换: world → ego LiDAR
     pos_world = np.array([obj['x'], obj['y'], obj['z']]).reshape(3, 1)
+    pos_lidar = R_world2lidar @ pos_world + t_world2lidar
 
-    # 世界 → ego LiDAR
-    pos_lidar = ego_rotate_mat @ pos_world + ego_trans
-
-    # yaw 转换: 相对于 ego 的朝向
+    # 朝向变换: 将物体的局部坐标轴通过 R_world2lidar 旋转
+    obj_roll = obj.get('roll', 0.0)
+    obj_pitch = obj.get('pitch', 0.0)
     obj_yaw = obj.get('yaw', 0.0)
-    yaw_in_ego = obj_yaw - ego_yaw
 
-    # 归一化 yaw 到 [-pi, pi]
-    yaw_in_ego = (yaw_in_ego + np.pi) % (2 * np.pi) - np.pi
+    # 物体在世界坐标系中的旋转矩阵 (ZYX欧拉角)
+    from scipy.spatial.transform import Rotation as Rot
+    R_obj_world = Rot.from_euler('xyz', [obj_roll, obj_pitch, obj_yaw]).as_matrix()
+
+    # 物体在 ego LiDAR 坐标系中的旋转矩阵
+    R_obj_lidar = R_world2lidar @ R_obj_world
+
+    # 从旋转矩阵提取欧拉角
+    euler_lidar = Rot.from_matrix(R_obj_lidar).as_euler('xyz')
+    roll_lidar, pitch_lidar, yaw_lidar = euler_lidar
 
     return {
         'id': obj['id'],
@@ -47,9 +56,9 @@ def transform_object_to_ego_frame(obj, ego_rotate_mat, ego_trans, ego_yaw):
         'length': obj.get('length', 0.0),
         'width': obj.get('width', 0.0),
         'height': obj.get('height', 0.0),
-        'roll': obj.get('roll', 0.0),
-        'pitch': obj.get('pitch', 0.0),
-        'yaw': float(yaw_in_ego),
+        'roll': float(roll_lidar),
+        'pitch': float(pitch_lidar),
+        'yaw': float(yaw_lidar),
         'occlusion': obj.get('occlusion', 0),
         'num_points': obj.get('num_points', 0),
         'vx': obj.get('vx', 0.0),
@@ -92,7 +101,7 @@ def convert_single_frame(annotation_path, vehicle_id, output_path):
             continue  # 排除 ego 自身
 
         obj_ego = transform_object_to_ego_frame(
-            obj, R_world2lidar, trans, world_yaw
+            obj, R_world2lidar, trans
         )
         objects_ego.append(obj_ego)
 
