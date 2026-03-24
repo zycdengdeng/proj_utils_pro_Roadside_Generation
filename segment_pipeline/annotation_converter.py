@@ -9,7 +9,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-from .ego_transform import get_vehicle_transform
+from .ego_transform import get_world2ego_transform
 
 
 def transform_object_to_ego_frame(obj, R_world2lidar, t_world2lidar):
@@ -81,18 +81,14 @@ def convert_single_frame(annotation_path, vehicle_id, output_path):
     with open(annotation_path, 'r') as f:
         annotation = json.load(f)
 
-    # 获取 ego 变换
+    # 获取 world2ego 变换（车体坐标系，不含 LiDAR 偏移）
     try:
-        rotate, trans, world_pos, world_yaw, ego_obj = get_vehicle_transform(
+        R_world2ego, t_world2ego, world_pos, world_yaw, ego_obj = get_world2ego_transform(
             annotation, vehicle_id
         )
     except ValueError as e:
         print(f"  跳过: {e}")
         return -1
-
-    # 旋转矩阵
-    import cv2
-    R_world2lidar = cv2.Rodrigues(rotate)[0]
 
     # 转换所有非 ego 物体
     objects_ego = []
@@ -101,7 +97,7 @@ def convert_single_frame(annotation_path, vehicle_id, output_path):
             continue  # 排除 ego 自身
 
         obj_ego = transform_object_to_ego_frame(
-            obj, R_world2lidar, trans
+            obj, R_world2ego, t_world2ego
         )
         objects_ego.append(obj_ego)
 

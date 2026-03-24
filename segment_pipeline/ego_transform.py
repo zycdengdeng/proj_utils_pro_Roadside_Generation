@@ -2,7 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Ego 车辆变换模块
-从路侧标注中提取目标车辆的位姿，计算 world2lidar 变换矩阵
+从路侧标注中提取目标车辆的位姿，计算变换矩阵
+
+提供两种变换:
+- world2lidar: 用于点云投影 (含 LiDAR 安装偏移)
+- world2ego:   用于标注转换 (仅车体中心，不含 LiDAR 偏移)
 """
 
 import numpy as np
@@ -65,9 +69,32 @@ def get_world2carlidar(rotate_car2world, trans_car2world, lidar2car_quat, lidar2
     return rotation_vector, t_world2lidar
 
 
+def _find_vehicle_in_annotation(annotation, vehicle_id):
+    """从标注中查找指定车辆"""
+    for obj in annotation.get('object', []):
+        if obj['id'] == vehicle_id:
+            return obj
+    return None
+
+
+def _get_car2world_params(vehicle):
+    """从车辆标注对象中提取 car2world 参数"""
+    car2world_rotate = np.array([
+        vehicle.get('roll', 0.0),
+        vehicle.get('pitch', 0.0),
+        vehicle['yaw']
+    ]).reshape((3, 1))
+    car2world_trans = np.array([
+        vehicle['x'], vehicle['y'], vehicle['z']
+    ]).reshape((3, 1))
+    return car2world_rotate, car2world_trans
+
+
 def get_vehicle_transform(annotation, vehicle_id):
     """
-    从标注中获取指定车辆的 world2lidar 变换
+    从标注中获取指定车辆的 world2lidar 变换（用于点云投影）
+
+    包含 LiDAR 安装偏移，适用于点云投影到相机的坐标链。
 
     Args:
         annotation: 标注 JSON dict (含 'object' 列表)
@@ -83,24 +110,11 @@ def get_vehicle_transform(annotation, vehicle_id):
     Raises:
         ValueError: 未找到指定车辆
     """
-    vehicle = None
-    for obj in annotation.get('object', []):
-        if obj['id'] == vehicle_id:
-            vehicle = obj
-            break
-
+    vehicle = _find_vehicle_in_annotation(annotation, vehicle_id)
     if not vehicle:
         raise ValueError(f"未找到车辆 ID={vehicle_id}")
 
-    # 车体在世界坐标系的位姿
-    car2world_rotate = np.array([
-        vehicle.get('roll', 0.0),
-        vehicle.get('pitch', 0.0),
-        vehicle['yaw']
-    ]).reshape((3, 1))
-    car2world_trans = np.array([
-        vehicle['x'], vehicle['y'], vehicle['z']
-    ]).reshape((3, 1))
+    car2world_rotate, car2world_trans = _get_car2world_params(vehicle)
 
     # LiDAR 在车体中的安装位置
     box_height = vehicle.get('height', 1.72)
@@ -121,6 +135,44 @@ def get_vehicle_transform(annotation, vehicle_id):
     world_yaw = vehicle['yaw']
 
     return rotate, trans, world_pos, world_yaw, vehicle
+
+
+def get_world2ego_transform(annotation, vehicle_id):
+    """
+    从标注中获取指定车辆的 world2ego 变换（用于标注坐标转换）
+
+    仅从车体 bbox 中心位姿取逆，不含 LiDAR 安装偏移。
+    适用于将其他物体的 3D 标注转换到 ego 车体坐标系。
+
+    Args:
+        annotation: 标注 JSON dict (含 'object' 列表)
+        vehicle_id: 目标车辆 ID
+
+    Returns:
+        R_world2ego: world2ego 旋转矩阵, shape (3,3)
+        t_world2ego: world2ego 平移向量, shape (3,1)
+        world_pos: 车辆世界坐标 [x, y, z]
+        world_yaw: 车辆世界朝向 yaw
+        vehicle_obj: 原始标注对象 dict
+
+    Raises:
+        ValueError: 未找到指定车辆
+    """
+    vehicle = _find_vehicle_in_annotation(annotation, vehicle_id)
+    if not vehicle:
+        raise ValueError(f"未找到车辆 ID={vehicle_id}")
+
+    car2world_rotate, car2world_trans = _get_car2world_params(vehicle)
+
+    # car2world 的逆 = world2ego
+    R_car2world = cv2.Rodrigues(car2world_rotate)[0]
+    R_world2ego = R_car2world.T
+    t_world2ego = -R_world2ego @ car2world_trans
+
+    world_pos = car2world_trans.flatten()
+    world_yaw = vehicle['yaw']
+
+    return R_world2ego, t_world2ego, world_pos, world_yaw, vehicle
 
 
 def points_world_to_lidar(points, rotate, trans):
