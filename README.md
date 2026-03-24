@@ -17,17 +17,19 @@ python -m segment_pipeline.segment_pipeline --interactive
 ### 第2步：生成训练视频 + caption
 
 ```bash
-python transfer_video_maker/generate_transfer2_videos.py \
-  --segments-dir segment_pipeline/output \
-  --project-type depth \
-  --output-dir transfer_video_maker/output/DepthSparse \
-  --fps 10
+bash transfer_video_maker/generate_videos.sh
 ```
 
-- `--segments-dir`：第1步的输出目录，每个 seg 目录 = 一个视频（29帧，不需要手动指定帧数或seg数量）
-- `--project-type`：选哪种投影做控制输入（depth / depth_dense / blur / blur_dense / basic / hdmap）
-- 朝向自动从每个 seg 的 `direction.json` 读取，写入 caption
-- 输出在 `--output-dir`，按控制头类型分目录
+- 选投影类型（多选）→ 选场景 → 确认 → 批量生成
+- 默认投影：blur + depth + hdmap，默认场景：all
+- 直接全部回车就开始跑，输出在 `transfer_video_maker/output/` 按投影类型分目录
+- 也可以直接用 python 命令（跳过交互）：
+  ```bash
+  python transfer_video_maker/generate_transfer2_videos.py \
+    --segments-dir segment_pipeline/output \
+    --project-type depth \
+    --output-dir transfer_video_maker/output/DepthSparse
+  ```
 
 ### 第3步：caption 批量替换（含朝向）
 
