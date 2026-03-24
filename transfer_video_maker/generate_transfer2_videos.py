@@ -34,6 +34,25 @@ CAMERA_NAME_MAPPING = {
 
 CAMERA_NAMES = ['FN', 'FW', 'FL', 'FR', 'RL', 'RR', 'RN']
 
+# 相机视角描述（用于 caption）
+CAMERA_VIEW_PREFIX = {
+    'ftheta_camera_front_tele_30fov': 'Front telephoto view',
+    'ftheta_camera_front_wide_120fov': 'Front wide view',
+    'ftheta_camera_cross_left_120fov': 'Left cross view',
+    'ftheta_camera_cross_right_120fov': 'Right cross view',
+    'ftheta_camera_rear_left_70fov': 'Rear left view',
+    'ftheta_camera_rear_right_70fov': 'Rear right view',
+    'ftheta_camera_rear_tele_30fov': 'Rear telephoto view'
+}
+
+# direction_key → caption 文本
+DIRECTION_TEXT = {
+    'W2E': 'west to east',
+    'E2W': 'east to west',
+    'N2S': 'north to south',
+    'S2N': 'south to north',
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='生成 Transfer2 格式视频数据集')
@@ -77,17 +96,17 @@ def parse_args():
 
 PROJECT_TYPE_DEFAULTS = {
     'basic':      {'control_subdir': 'proj',    'control_input_type': 'basic',
-                   'caption': 'A basic point cloud projection from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
     'blur':       {'control_subdir': 'proj',    'control_input_type': 'blur',
-                   'caption': 'A roadside-colored point cloud projection from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
     'blur_dense': {'control_subdir': 'proj',    'control_input_type': 'blur_dense',
-                   'caption': 'A dense roadside-colored projection from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
     'depth':      {'control_subdir': 'depth',   'control_input_type': 'depth',
-                   'caption': 'A depth map from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
     'depth_dense':{'control_subdir': 'depth',   'control_input_type': 'depth_dense',
-                   'caption': 'A dense depth map from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
     'hdmap':      {'control_subdir': 'overlay', 'control_input_type': 'hdmap_bbox',
-                   'caption': 'High-definition map with bounding boxes from {camera}'},
+                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
 }
 
 
@@ -134,16 +153,38 @@ def create_video_from_images(image_paths, output_path, fps, target_resolution=(1
     video_writer.release()
 
 
-def create_caption_json(seg_name, camera_name, caption_template):
-    """创建 caption JSON"""
+def load_direction(seg_dir):
+    """从 segment 目录读取 direction.json"""
+    direction_file = Path(seg_dir) / 'direction.json'
+    if direction_file.exists():
+        with open(direction_file, 'r') as f:
+            data = json.load(f)
+        direction_key = data.get('direction_key', 'unknown')
+        return DIRECTION_TEXT.get(direction_key, data.get('direction', 'unknown direction'))
+    return 'unknown direction'
+
+
+def create_caption_json(seg_name, camera_name, caption_template, direction='unknown direction'):
+    """
+    创建 caption JSON
+
+    模板可用变量: {camera}, {view_prefix}, {direction}
+    """
+    view_prefix = CAMERA_VIEW_PREFIX.get(camera_name, camera_name)
+
     if caption_template:
-        caption = caption_template.format(camera=camera_name)
+        caption = caption_template.format(
+            camera=camera_name,
+            view_prefix=view_prefix,
+            direction=direction
+        )
     else:
-        caption = f"{seg_name} from {camera_name}"
+        caption = f"{view_prefix}. The ego vehicle is traveling from {direction}."
 
     return {
         "segment_name": seg_name,
         "camera": camera_name,
+        "direction": direction,
         "caption": caption
     }
 
@@ -208,7 +249,10 @@ def process_segment_mode(args):
             print(f"跳过 {seg_name}: 无时间戳目录")
             continue
 
-        print(f"\n处理: {seg_name} ({len(ts_folders)} 帧)")
+        # 读取朝向（从 segment_pipeline 生成的 direction.json）
+        direction = load_direction(seg_dir)
+
+        print(f"\n处理: {seg_name} ({len(ts_folders)} 帧, {direction})")
 
         for cam_name in CAMERA_NAMES:
             transfer_cam_name = CAMERA_NAME_MAPPING[cam_name]
@@ -240,10 +284,12 @@ def process_segment_mode(args):
             ctrl_video = Path(args.output_dir) / f'control_input_{control_input_type}' / transfer_cam_name / video_filename
             create_video_from_images(control_paths, ctrl_video, args.fps)
 
-            # Caption JSON
+            # Caption JSON（包含朝向）
             caption_path = Path(args.output_dir) / 'captions' / transfer_cam_name / f"{seg_name}.json"
             caption_path.parent.mkdir(parents=True, exist_ok=True)
-            caption_data = create_caption_json(seg_name, transfer_cam_name, caption_template)
+            caption_data = create_caption_json(
+                seg_name, transfer_cam_name, caption_template, direction
+            )
             with open(caption_path, 'w', encoding='utf-8') as f:
                 json.dump(caption_data, f, indent=2, ensure_ascii=False)
 
