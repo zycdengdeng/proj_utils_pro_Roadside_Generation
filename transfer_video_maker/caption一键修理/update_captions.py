@@ -5,17 +5,20 @@
 
 支持：
 - 自动识别所有7个相机目录
-- 支持模板变量：{camera}, {scene}, {seg}
+- 支持模板变量：{camera}, {scene}, {seg}, {view_prefix}, {direction}
+- 支持新数据格式：scene{id}/ 子目录，文件名 {scene_id}_id{vehicle_id}_seg{nn}.json
+- 自动从 direction.json 读取行驶方向（segment_pipeline 生成）
 - 预览更改后再应用
 - 可选择单个或多个数据集
 """
 
 import json
+import re
 from pathlib import Path
 import argparse
 import sys
 
-# 相机名称列表（Transfer2格式）
+# 相机名称列表（用于遍历文件夹）
 CAMERA_NAMES = [
     'ftheta_camera_front_tele_30fov',
     'ftheta_camera_front_wide_120fov',
@@ -26,44 +29,143 @@ CAMERA_NAMES = [
     'ftheta_camera_rear_tele_30fov'
 ]
 
-# 预定义caption模板（1-6 是预设模板，应用于不同的功能）
+# 相机视角映射（用于生成 caption 前缀）
+CAMERA_VIEW_PREFIX = {
+    'ftheta_camera_front_tele_30fov': 'Front telephoto view',
+    'ftheta_camera_front_wide_120fov': 'Front wide view',
+    'ftheta_camera_cross_left_120fov': 'Left cross view',
+    'ftheta_camera_cross_right_120fov': 'Right cross view',
+    'ftheta_camera_rear_left_70fov': 'Rear left view',
+    'ftheta_camera_rear_right_70fov': 'Rear right view',
+    'ftheta_camera_rear_tele_30fov': 'Rear telephoto view'
+}
+
+# 详细场景描述（描述目标 RGB 输出）
+SCENE_DESCRIPTION = (
+    "Northern Chinese suburban intersection captured in early spring. "
+    "Clear daytime conditions with bright blue sky and soft natural sunlight casting gentle shadows. "
+    "Wide multi-lane asphalt road surface in good condition with crisp white lane markings, "
+    "directional arrows, and crosswalk patterns. Beige and tan colored high-rise residential "
+    "apartment buildings line both sides of the street, typical of Chinese suburban architecture. "
+    "Rows of bare deciduous trees with leafless branches stand along the sidewalks, characteristic "
+    "of late winter to early spring season. White painted metal safety railings separate the road "
+    "from pedestrian areas. Green traffic signals mounted on overhead poles with directional signs. "
+    "Street lamp posts visible along the road. Occasional mixed traffic including sedans, SUVs, "
+    "buses, trucks, and non-motorized road users such as pedestrians, cyclists, and electric "
+    "tricycles. Clean urban environment with well-maintained infrastructure."
+)
+
+# 预定义caption模板（统一描述目标 RGB 输出，包含朝向）
 PRESET_TEMPLATES = {
-    'depth': 'This is a depth map directly obtained from LiDAR points, so the depth is relatively sparse. The scene comes from an autonomous driving video captured from the {camera} viewpoint of the ego vehicle. The vehicle is passing through an urban intersection with traffic lights, various signal poles, and greenery along both sides of the road. Around the ego vehicle, there are moving vehicles, vehicles waiting at the lights, roadside vegetation, billboards, and other elements typical of a real city intersection.',
-    'depth_dense': 'This is a dense depth map generated from LiDAR points, where the originally sparse depths have been filled using rule-based interpolation. The scene is from an autonomous driving video captured from the {camera} viewpoint at a real urban intersection with traffic lights, signal poles, greenery, and nearby moving or waiting vehicles, together with billboards and other typical urban traffic elements.',
-    'hdmap': 'This is an HD map representation from an autonomous driving video captured from the {camera} viewpoint. The ego vehicle is crossing an urban intersection equipped with traffic lights and signal poles. There are moving vehicles, vehicles waiting at the lights, roadside greenery, billboards, and other components of a realistic city traffic environment.',
-    'blur': 'This is a point cloud projection generated from LiDAR points with partial coloring provided by roadside cameras. The coloring is incomplete and the points are relatively sparse. The scene comes from an autonomous driving video captured from the {camera} viewpoint at a real urban intersection with traffic lights, signal poles, greenery, as well as nearby moving vehicles, vehicles waiting at the lights, billboards, and other typical city objects.',
-    'blur_dense': 'This is a denser point cloud projection created from LiDAR points colored by roadside cameras, with additional interpolation applied to increase density. The scene is an autonomous driving video captured from the {camera} viewpoint, showing a real urban intersection with traffic lights, signal poles, greenery, moving vehicles, waiting vehicles, billboards, and other typical components of a city traffic environment.',
-    'basic': 'This is a frame from an autonomous driving video captured from the {camera} viewpoint of the ego vehicle. The vehicle is crossing a realistic urban intersection with traffic lights, signal poles, roadside greenery, billboards, and various moving or waiting vehicles, forming a typical city traffic scene.'
+    'unified': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'depth': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'depth_dense': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'hdmap': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'blur': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'blur_dense': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
+    'basic': '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION,
 }
 
 # 数据集名称到模板的自动映射
 DATASET_TEMPLATE_MAPPING = {
-    'DepthSparse': 'depth',
-    'DepthDense': 'depth_dense',
-    'HDMapBbox': 'hdmap',
-    'BlurProjection': 'blur',
-    'BlurDense': 'blur_dense',
-    'BasicProjection': 'basic'
+    'DepthSparse': 'unified',
+    'DepthDense': 'unified',
+    'HDMapBbox': 'unified',
+    'BlurProjection': 'unified',
+    'BlurDense': 'unified',
+    'BasicProjection': 'unified'
 }
 
 
-def find_datasets(base_dir):
+# ============================================================
+# direction.json 自动查找
+# ============================================================
+
+# 缓存已加载的 direction 信息
+_direction_cache = {}
+
+
+def load_direction_from_segment_output(segment_output_dir):
     """
-    查找所有数据集目录
+    从 segment_pipeline 输出目录加载 direction.json
 
     Args:
-        base_dir: 基础目录
+        segment_output_dir: segment 输出目录 (含 direction.json)
 
     Returns:
-        dataset_dirs: 数据集目录列表
+        direction_text: 如 'west to east', 找不到则返回 None
     """
-    base_path = Path(base_dir)
+    cache_key = str(segment_output_dir)
+    if cache_key in _direction_cache:
+        return _direction_cache[cache_key]
 
+    direction_file = Path(segment_output_dir) / "direction.json"
+    if direction_file.exists():
+        with open(direction_file, 'r') as f:
+            data = json.load(f)
+        direction = data.get('direction', None)
+        _direction_cache[cache_key] = direction
+        return direction
+
+    _direction_cache[cache_key] = None
+    return None
+
+
+def find_direction_for_segment(json_path, segment_pipeline_output=None):
+    """
+    为 caption 文件查找对应的行驶方向
+
+    尝试查找策略：
+    1. 从 segment_pipeline 输出目录的 direction.json 读取
+    2. 从 caption JSON 文件本身已有的 direction 字段读取
+    3. 返回 'unknown direction'
+
+    Args:
+        json_path: caption JSON 文件路径
+        segment_pipeline_output: segment_pipeline 输出根目录
+
+    Returns:
+        direction_text: 如 'west to east'
+    """
+    # 策略1: 从 segment_pipeline 输出读取
+    if segment_pipeline_output:
+        # 从文件名解析 scene_id 和 vehicle_id
+        info = parse_caption_filename(json_path)
+        scene_id = info.get('scene', '')
+        vehicle_id = info.get('vehicle_id', '')
+        seg = info.get('seg', '')
+
+        if scene_id and vehicle_id and seg:
+            seg_dir = (Path(segment_pipeline_output) /
+                       f"scene{scene_id}" /
+                       f"vehicle{vehicle_id}_{seg}")
+            direction = load_direction_from_segment_output(seg_dir)
+            if direction:
+                return direction
+
+    # 策略2: 从 caption JSON 已有的 direction 字段读取
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        if 'direction' in data and data['direction']:
+            return data['direction']
+    except Exception:
+        pass
+
+    return 'unknown direction'
+
+
+# ============================================================
+# 核心函数
+# ============================================================
+
+def find_datasets(base_dir):
+    """查找所有数据集目录"""
+    base_path = Path(base_dir)
     if not base_path.exists():
         print(f"错误: 目录不存在: {base_dir}")
         return []
 
-    # 查找所有包含 captions/ 子目录的目录
     dataset_dirs = []
     for item in base_path.iterdir():
         if item.is_dir():
@@ -78,22 +180,25 @@ def get_caption_files(dataset_dir):
     """
     获取数据集中所有caption JSON文件
 
-    Args:
-        dataset_dir: 数据集目录
-
-    Returns:
-        caption_files: JSON文件路径列表
+    支持两种目录结构：
+    1. 旧格式：captions/{camera}/{scene}_seg{nn}.json
+    2. 新格式：captions/{camera}/scene{id}/{scene_id}_id{vehicle_id}_seg{nn}.json
     """
     captions_dir = dataset_dir / 'captions'
     caption_files = []
 
-    # 遍历所有相机目录
     for cam_name in CAMERA_NAMES:
         cam_dir = captions_dir / cam_name
         if cam_dir.exists():
-            # 收集该相机的所有JSON文件
+            # 旧格式：直接在相机目录下的JSON文件
             json_files = sorted(cam_dir.glob('*.json'))
             caption_files.extend(json_files)
+
+            # 新格式：scene{id}/ 子目录下的JSON文件
+            for scene_subdir in cam_dir.iterdir():
+                if scene_subdir.is_dir() and scene_subdir.name.startswith('scene'):
+                    json_files = sorted(scene_subdir.glob('*.json'))
+                    caption_files.extend(json_files)
 
     return caption_files
 
@@ -102,66 +207,75 @@ def parse_caption_filename(json_path):
     """
     从JSON文件名解析信息
 
-    Args:
-        json_path: JSON文件路径
-
-    Returns:
-        info: {camera, scene, seg} 字典
+    支持两种格式：
+    1. 旧格式：002_seg01.json -> scene=002, seg=seg01
+    2. 新格式：004_id45_seg01.json -> scene=004, vehicle_id=45, seg=seg01
     """
-    camera = json_path.parent.name
-    filename = json_path.stem  # 如 "002_seg01"
+    filename = json_path.stem
 
+    # 确定相机名称
+    parent = json_path.parent
+    if parent.name.startswith('scene'):
+        camera = parent.parent.name
+    else:
+        camera = parent.name
+
+    # 解析文件名
     parts = filename.split('_')
     scene = parts[0]
-    seg = parts[1] if len(parts) > 1 else 'seg01'
+
+    # 检查是否为新格式（包含 idXX）
+    if len(parts) >= 3 and parts[1].startswith('id'):
+        vehicle_id = parts[1][2:]
+        seg = parts[2] if len(parts) > 2 else 'seg01'
+    else:
+        vehicle_id = None
+        seg = parts[1] if len(parts) > 1 else 'seg01'
+
+    # 视角前缀
+    view_prefix = CAMERA_VIEW_PREFIX.get(
+        camera, camera.replace('ftheta_', '').replace('_', ' ')
+    )
 
     return {
         'camera': camera,
+        'view_prefix': view_prefix,
         'scene': scene,
-        'seg': seg
+        'vehicle_id': vehicle_id,
+        'seg': seg,
+        'direction': 'unknown direction',  # placeholder, 将被覆盖
     }
 
 
 def generate_caption(template, info):
-    """
-    根据模板生成caption
-
-    Args:
-        template: Caption模板
-        info: {camera, scene, seg} 字典
-
-    Returns:
-        caption: 生成的caption
-    """
+    """根据模板生成caption"""
     return template.format(**info)
 
 
-def preview_changes(caption_files, template, max_preview=5):
-    """
-    预览将要做的更改
-
-    Args:
-        caption_files: JSON文件路径列表
-        template: 新的caption模板
-        max_preview: 最多预览多少个
-    """
+def preview_changes(caption_files, template, segment_pipeline_output=None, max_preview=5):
+    """预览将要做的更改"""
     print(f"\n预览更改（显示前 {max_preview} 个）:")
     print("=" * 80)
 
     for i, json_path in enumerate(caption_files[:max_preview]):
-        # 读取当前内容
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
         old_caption = data.get('caption', '')
 
-        # 生成新caption
         info = parse_caption_filename(json_path)
+        info['direction'] = find_direction_for_segment(json_path, segment_pipeline_output)
         new_caption = generate_caption(template, info)
 
-        print(f"\n文件: {json_path.relative_to(json_path.parents[3])}")
-        print(f"  旧: {old_caption}")
-        print(f"  新: {new_caption}")
+        rel_path = json_path.name
+        try:
+            rel_path = json_path.relative_to(json_path.parents[3])
+        except (ValueError, IndexError):
+            pass
+        print(f"\n文件: {rel_path}")
+        print(f"  方向: {info['direction']}")
+        print(f"  旧: {str(old_caption)[:100]}...")
+        print(f"  新: {new_caption[:100]}...")
 
     if len(caption_files) > max_preview:
         print(f"\n... 还有 {len(caption_files) - max_preview} 个文件")
@@ -170,13 +284,14 @@ def preview_changes(caption_files, template, max_preview=5):
     print("=" * 80)
 
 
-def update_captions(caption_files, template, dry_run=False):
+def update_captions(caption_files, template, segment_pipeline_output=None, dry_run=False):
     """
     更新所有caption
 
     Args:
         caption_files: JSON文件路径列表
         template: 新的caption模板
+        segment_pipeline_output: segment_pipeline 输出目录 (用于读取 direction.json)
         dry_run: 是否只是预览，不实际修改
 
     Returns:
@@ -186,19 +301,18 @@ def update_captions(caption_files, template, dry_run=False):
 
     for json_path in caption_files:
         try:
-            # 读取JSON
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            # 生成新caption
             info = parse_caption_filename(json_path)
+            info['direction'] = find_direction_for_segment(json_path, segment_pipeline_output)
             new_caption = generate_caption(template, info)
 
-            # 更新caption
             data['caption'] = new_caption
+            # 同时保存 direction 到 JSON 供后续使用
+            data['direction'] = info['direction']
 
             if not dry_run:
-                # 写回文件
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -210,20 +324,20 @@ def update_captions(caption_files, template, dry_run=False):
     return success_count
 
 
-def interactive_mode(base_dir):
-    """
-    交互式模式
+# ============================================================
+# 交互式模式
+# ============================================================
 
-    Args:
-        base_dir: 数据集基础目录
-    """
+def interactive_mode(base_dir, segment_pipeline_output=None):
+    """交互式模式"""
     print("=" * 80)
     print("Transfer2 Caption 批量更新工具")
     print("=" * 80)
 
-    # 查找所有数据集
-    datasets = find_datasets(base_dir)
+    if segment_pipeline_output:
+        print(f"方向数据来源: {segment_pipeline_output}")
 
+    datasets = find_datasets(base_dir)
     if not datasets:
         print(f"错误: 在 {base_dir} 下未找到任何数据集")
         return
@@ -236,9 +350,7 @@ def interactive_mode(base_dir):
     print(f"  {len(datasets) + 1}) 全部数据集")
     print("  0) 退出")
 
-    # 选择数据集
     choice = input(f"\n请选择数据集 [1-{len(datasets) + 1}, 0]: ").strip()
-
     if choice == '0':
         print("已退出")
         return
@@ -247,10 +359,8 @@ def interactive_mode(base_dir):
         choice_num = int(choice)
         if choice_num == len(datasets) + 1:
             selected_datasets = datasets
-            print(f"\n已选择: 全部 {len(datasets)} 个数据集")
         elif 1 <= choice_num <= len(datasets):
             selected_datasets = [datasets[choice_num - 1]]
-            print(f"\n已选择: {selected_datasets[0].name}")
         else:
             print("无效选择")
             return
@@ -258,7 +368,6 @@ def interactive_mode(base_dir):
         print("无效输入")
         return
 
-    # 收集所有caption文件
     all_caption_files = []
     for ds in selected_datasets:
         all_caption_files.extend(get_caption_files(ds))
@@ -269,19 +378,16 @@ def interactive_mode(base_dir):
 
     print(f"\n总计: {len(all_caption_files)} 个caption文件")
 
-    # 显示预设模板
+    # 模板选择
     print("\n预设caption模板:")
-
-    # 如果选择了多个数据集，提供自动匹配选项
     if len(selected_datasets) > 1:
         print(f"  0) 自动匹配（每个数据集使用对应的预设模板）")
 
     presets = list(PRESET_TEMPLATES.items())
     for i, (key, template) in enumerate(presets, 1):
-        print(f"  {i}) {key}: \"{template}\"")
+        print(f"  {i}) {key}: \"{template[:60]}...\"")
     print(f"  {len(presets) + 1}) 自定义模板")
 
-    # 选择模板
     if len(selected_datasets) > 1:
         template_choice = input(f"\n请选择模板 [0-{len(presets) + 1}]: ").strip()
     else:
@@ -290,60 +396,41 @@ def interactive_mode(base_dir):
     try:
         template_num = int(template_choice)
 
-        # 自动匹配模式（仅在选择了多个数据集时可用）
         if template_num == 0 and len(selected_datasets) > 1:
-            print("\n使用自动匹配模式：每个数据集使用对应的预设模板")
-
-            # 显示匹配结果
+            # 自动匹配模式
+            print("\n使用自动匹配模式")
             print("\n匹配结果:")
             for ds in selected_datasets:
-                dataset_name = ds.name
-                matched_template_key = DATASET_TEMPLATE_MAPPING.get(dataset_name, None)
-                if matched_template_key:
-                    print(f"  {dataset_name} → {matched_template_key}")
+                matched = DATASET_TEMPLATE_MAPPING.get(ds.name, None)
+                if matched:
+                    print(f"  {ds.name} -> {matched}")
                 else:
-                    print(f"  {dataset_name} → [无匹配模板，将跳过]")
+                    print(f"  {ds.name} -> [无匹配，跳过]")
 
-            # 确认
-            confirm = input("\n确认使用自动匹配更新? [y/N]: ").strip().lower()
-
+            confirm = input("\n确认? [y/N]: ").strip().lower()
             if confirm != 'y':
-                print("已取消")
                 return
 
-            # 执行自动匹配更新
             print("\n正在更新...")
             total_success = 0
-
             for ds in selected_datasets:
-                dataset_name = ds.name
-                matched_template_key = DATASET_TEMPLATE_MAPPING.get(dataset_name, None)
-
-                if not matched_template_key:
-                    print(f"  跳过 {dataset_name}：未找到匹配的模板")
+                matched = DATASET_TEMPLATE_MAPPING.get(ds.name)
+                if not matched:
                     continue
+                template = PRESET_TEMPLATES[matched]
+                files = get_caption_files(ds)
+                if files:
+                    success = update_captions(files, template, segment_pipeline_output)
+                    total_success += success
+                    print(f"  {ds.name}: {success}/{len(files)}")
 
-                template = PRESET_TEMPLATES[matched_template_key]
-                caption_files = get_caption_files(ds)
-
-                if not caption_files:
-                    print(f"  跳过 {dataset_name}：未找到caption文件")
-                    continue
-
-                print(f"\n  处理 {dataset_name} (使用模板: {matched_template_key})...")
-                success = update_captions(caption_files, template, dry_run=False)
-                total_success += success
-                print(f"    ✓ 成功更新 {success}/{len(caption_files)} 个文件")
-
-            print(f"\n✓ 完成! 总计成功更新 {total_success}/{len(all_caption_files)} 个文件")
+            print(f"\n完成: {total_success}/{len(all_caption_files)}")
             return
 
-        # 手动选择模板（单个模板应用到所有数据集）
         elif 1 <= template_num <= len(presets):
             template = presets[template_num - 1][1]
-            print(f"\n使用模板: \"{template[:80]}...\"")
         elif template_num == len(presets) + 1:
-            template = input("\n请输入自定义模板（可用变量: {camera}, {scene}, {seg}）: ").strip()
+            template = input("\n自定义模板 (变量: {camera}, {view_prefix}, {scene}, {seg}, {direction}): ").strip()
             if not template:
                 print("错误: 模板不能为空")
                 return
@@ -354,36 +441,37 @@ def interactive_mode(base_dir):
         print("无效输入")
         return
 
-    # 预览更改
-    preview_changes(all_caption_files, template, max_preview=5)
+    preview_changes(all_caption_files, template, segment_pipeline_output)
 
-    # 确认
-    confirm = input("\n确认更新所有caption? [y/N]: ").strip().lower()
-
+    confirm = input("\n确认更新? [y/N]: ").strip().lower()
     if confirm != 'y':
         print("已取消")
         return
 
-    # 执行更新
     print("\n正在更新...")
-    success_count = update_captions(all_caption_files, template, dry_run=False)
+    success_count = update_captions(all_caption_files, template, segment_pipeline_output)
+    print(f"\n完成: {success_count}/{len(all_caption_files)}")
 
-    print(f"\n✓ 完成! 成功更新 {success_count}/{len(all_caption_files)} 个文件")
 
+# ============================================================
+# 主函数
+# ============================================================
 
 def main():
-    """主函数"""
     parser = argparse.ArgumentParser(description='批量更新 Transfer2 数据集的 caption')
 
     parser.add_argument('--base-dir', type=str,
-                        default='/mnt/zihanw/proj_utils_pro/transfer_video_maker/output',
+                        default='/mnt/zihanw/proj_utils_pro_Roadside_Generation/transfer_video_maker/output',
                         help='数据集基础目录')
 
+    parser.add_argument('--segment-output', type=str, default=None,
+                        help='segment_pipeline 输出目录 (含 direction.json)')
+
     parser.add_argument('--dataset', type=str,
-                        help='指定数据集名称（如 DepthSparse）')
+                        help='指定数据集名称')
 
     parser.add_argument('--template', type=str,
-                        help='Caption模板（支持 {camera}, {scene}, {seg}）')
+                        help='Caption模板')
 
     parser.add_argument('--preset', type=str,
                         choices=list(PRESET_TEMPLATES.keys()),
@@ -397,9 +485,17 @@ def main():
 
     args = parser.parse_args()
 
-    # 如果没有指定任何参数，使用交互式模式
+    # 自动查找 segment_pipeline 输出目录
+    segment_output = args.segment_output
+    if segment_output is None:
+        # 尝试默认路径
+        default_seg_output = Path(__file__).resolve().parent.parent.parent / "segment_pipeline" / "output"
+        if default_seg_output.exists():
+            segment_output = str(default_seg_output)
+            print(f"自动检测到 segment_pipeline 输出: {segment_output}")
+
     if len(sys.argv) == 1 or args.interactive:
-        interactive_mode(args.base_dir)
+        interactive_mode(args.base_dir, segment_output)
         return
 
     # 命令行模式
@@ -412,42 +508,33 @@ def main():
         return
 
     base_path = Path(args.base_dir)
-
     if args.dataset:
-        # 处理单个数据集
-        dataset_path = base_path / args.dataset
-        if not dataset_path.exists():
-            print(f"错误: 数据集不存在: {dataset_path}")
-            return
-        datasets = [dataset_path]
+        datasets = [base_path / args.dataset]
     else:
-        # 处理所有数据集
         datasets = find_datasets(base_path)
 
     if not datasets:
         print("错误: 未找到任何数据集")
         return
 
-    # 收集所有文件
     all_caption_files = []
     for ds in datasets:
-        all_caption_files.extend(get_caption_files(ds))
+        if ds.exists():
+            all_caption_files.extend(get_caption_files(ds))
 
     if not all_caption_files:
         print("错误: 未找到任何caption文件")
         return
 
-    # 预览
-    preview_changes(all_caption_files, template)
+    preview_changes(all_caption_files, template, segment_output)
 
     if args.dry_run:
-        print("\n[Dry-run 模式] 未实际修改文件")
+        print("\n[Dry-run] 未修改文件")
         return
 
-    # 执行更新
     print("\n正在更新...")
-    success_count = update_captions(all_caption_files, template, dry_run=False)
-    print(f"\n✓ 完成! 成功更新 {success_count}/{len(all_caption_files)} 个文件")
+    success_count = update_captions(all_caption_files, template, segment_output)
+    print(f"\n完成: {success_count}/{len(all_caption_files)}")
 
 
 if __name__ == "__main__":
