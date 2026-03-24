@@ -6,6 +6,9 @@ Segment Pipeline 主调度模块
   - pose.csv (ego 位姿)
   - annotations/ (ego 坐标系下的 3D 标注)
   - direction.json (行驶方向)
+  - 投影 (basic/blur/depth/hdmap，可选)
+
+命名格式: {scene}_id{vehicle_id}_seg{NN}  (如 004_id45_seg01)
 
 Usage:
     python -m segment_pipeline.segment_pipeline                    # 处理全部
@@ -18,13 +21,15 @@ import sys
 import argparse
 from pathlib import Path
 
-# 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from segment_pipeline.pose_generator import generate_pose_csv
 from segment_pipeline.annotation_converter import convert_segment_annotations
 from segment_pipeline.direction_detector import (
     build_reference_vectors, detect_direction, save_direction
+)
+from segment_pipeline.projection_runner import (
+    run_projection_for_segment, interactive_select_projections
 )
 from common_utils import find_scene_path, get_scene_paths
 
@@ -33,15 +38,13 @@ from common_utils import find_scene_path, get_scene_paths
 # 配置
 # ============================================================
 
-# filtered_segments.json 默认路径
 DEFAULT_SEGMENTS_FILE = (
     Path(__file__).resolve().parent.parent / "intersection_filter" / "output" / "filtered_segments.json"
 )
 
-# 输出根目录
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
-# intersection_filter 参考车辆 (导入或内联)
+# 方向参考车辆
 REFERENCE_VEHICLES = [
     {
         "scene_prefix": "002", "vehicle_id": 29,
@@ -67,6 +70,21 @@ REFERENCE_VEHICLES = [
 
 
 # ============================================================
+# 命名
+# ============================================================
+
+def make_seg_name(scene_id, vehicle_id, segment_index):
+    """
+    生成 segment 目录名
+
+    格式: {scene}_id{vid}_seg{NN}  (NN 从 01 开始)
+    例: 004_id45_seg01
+    """
+    seg_num = segment_index + 1
+    return f"{scene_id}_id{vehicle_id}_seg{seg_num:02d}"
+
+
+# ============================================================
 # 核心处理
 # ============================================================
 
@@ -80,7 +98,8 @@ def get_label_dir(scene_prefix):
     return None
 
 
-def process_single_segment(segment, ref_vectors, output_dir):
+def process_single_segment(segment, ref_vectors, output_dir, projection_types=None,
+                           num_threads=7):
     """
     处理单个 segment
 
@@ -88,6 +107,8 @@ def process_single_segment(segment, ref_vectors, output_dir):
         segment: segment dict from filtered_segments.json
         ref_vectors: 方向参考向量
         output_dir: 输出根目录
+        projection_types: 要运行的投影类型列表，None 或 [] 表示跳过
+        num_threads: 投影每帧线程数
 
     Returns:
         success: bool
@@ -98,16 +119,17 @@ def process_single_segment(segment, ref_vectors, output_dir):
     timestamps = segment['timestamps']
     label_files = segment['label_files']
 
-    seg_name = f"vehicle{vehicle_id}_seg{seg_idx:02d}"
-    seg_output = Path(output_dir) / f"scene{scene_id}" / seg_name
+    seg_name = make_seg_name(scene_id, vehicle_id, seg_idx)
+    seg_output = Path(output_dir) / seg_name
 
     print(f"\n{'─'*60}")
-    print(f"处理: scene={scene_id}, vehicle={vehicle_id}, seg={seg_idx}")
-    print(f"帧数: {len(timestamps)}, 输出: {seg_output}")
+    print(f"处理: {seg_name}")
+    print(f"  scene={scene_id}, vehicle={vehicle_id}, seg_idx={seg_idx}")
+    print(f"  帧数: {len(timestamps)}, 输出: {seg_output}")
     print(f"{'─'*60}")
 
     # Step 1: 生成 pose.csv
-    print("\n[1/3] 生成 pose.csv ...")
+    print("\n[1/4] 生成 pose.csv ...")
     pose_path = seg_output / "pose.csv"
     poses, missing = generate_pose_csv(
         label_files, timestamps, vehicle_id, pose_path
@@ -118,19 +140,28 @@ def process_single_segment(segment, ref_vectors, output_dir):
         return False
 
     # Step 2: 生成 annotations
-    print("\n[2/3] 转换标注到 ego 坐标系 ...")
+    print("\n[2/4] 转换标注到 ego 坐标系 ...")
     annotations_dir = seg_output / "annotations"
     convert_segment_annotations(
         label_files, timestamps, vehicle_id, annotations_dir
     )
 
     # Step 3: 检测方向
-    print("\n[3/3] 检测行驶方向 ...")
+    print("\n[3/4] 检测行驶方向 ...")
     direction_key, direction_text, confidence = detect_direction(poses, ref_vectors)
     save_direction(
         direction_key, direction_text, confidence,
         seg_output / "direction.json"
     )
+
+    # Step 4: 投影（可选）
+    if projection_types:
+        print(f"\n[4/4] 投影 ({', '.join(projection_types)}) ...")
+        run_projection_for_segment(
+            segment, projection_types, seg_output, num_threads
+        )
+    else:
+        print("\n[4/4] 跳过投影")
 
     return True
 
@@ -140,15 +171,7 @@ def process_single_segment(segment, ref_vectors, output_dir):
 # ============================================================
 
 def interactive_select(segments):
-    """
-    交互式选择要处理的 segments
-
-    Args:
-        segments: 全部 segments 列表
-
-    Returns:
-        selected: 选中的 segments 列表
-    """
+    """交互式选择要处理的 segments"""
     print("\n" + "="*60)
     print("Segment Pipeline - 交互式选择")
     print("="*60)
@@ -161,7 +184,6 @@ def interactive_select(segments):
             scenes[scene_id] = []
         scenes[scene_id].append(seg)
 
-    # 显示场景列表
     scene_ids = sorted(scenes.keys())
     print(f"\n共 {len(segments)} 个 segments, {len(scene_ids)} 个场景:")
     for i, sid in enumerate(scene_ids, 1):
@@ -187,7 +209,6 @@ def interactive_select(segments):
             selected_scene = scene_ids[idx]
             scene_segs = scenes[selected_scene]
 
-            # 如果场景有多个车辆，允许进一步选择
             vehicle_ids = sorted(set(s['vehicle_id'] for s in scene_segs))
             if len(vehicle_ids) > 1:
                 print(f"\n场景 {selected_scene} 中的车辆:")
@@ -239,7 +260,7 @@ def filter_segments(segments, scene_filter=None, vehicle_filter=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Segment Pipeline - 生成 pose/annotation/direction")
+    parser = argparse.ArgumentParser(description="Segment Pipeline - 生成 pose/annotation/direction/projection")
     parser.add_argument('--segments-file', type=str, default=str(DEFAULT_SEGMENTS_FILE),
                         help='filtered_segments.json 路径')
     parser.add_argument('--output-dir', type=str, default=str(DEFAULT_OUTPUT_DIR),
@@ -250,6 +271,12 @@ def main():
                         help='指定车辆ID (如 --vehicle-id 1 5)')
     parser.add_argument('--interactive', action='store_true',
                         help='交互式选择模式')
+    parser.add_argument('--projections', type=str, nargs='*',
+                        help='投影类型 (如 --projections basic depth hdmap)，不指定则交互选择')
+    parser.add_argument('--no-projection', action='store_true',
+                        help='跳过投影步骤')
+    parser.add_argument('--num-threads', type=int, default=7,
+                        help='投影每帧线程数 (默认 7)')
     args = parser.parse_args()
 
     print("="*60)
@@ -282,6 +309,26 @@ def main():
 
     print(f"\n将处理 {len(segments)} 个 segments")
 
+    # 预览 seg 命名
+    for seg in segments:
+        name = make_seg_name(seg['scene'], seg['vehicle_id'], seg.get('segment_index', 0))
+        print(f"  {name}")
+
+    # 投影类型选择
+    if args.no_projection:
+        projection_types = []
+    elif args.projections is not None:
+        projection_types = args.projections
+    elif args.interactive:
+        projection_types = interactive_select_projections()
+    else:
+        projection_types = []
+
+    if projection_types:
+        print(f"\n投影类型: {', '.join(projection_types)}")
+    else:
+        print(f"\n跳过投影")
+
     # 构建方向参考向量
     print("\n构建方向参考向量 ...")
     ref_vectors = build_reference_vectors(REFERENCE_VEHICLES, get_label_dir)
@@ -291,7 +338,8 @@ def main():
     # 处理每个 segment
     success_count = 0
     for seg in segments:
-        if process_single_segment(seg, ref_vectors, args.output_dir):
+        if process_single_segment(seg, ref_vectors, args.output_dir,
+                                  projection_types, args.num_threads):
             success_count += 1
 
     # 总结
