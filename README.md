@@ -31,17 +31,13 @@ bash transfer_video_maker/generate_videos.sh
     --output-dir transfer_video_maker/output/DepthSparse
   ```
 
-### 第3步：caption 批量替换（含朝向）
+### （可选）caption 批量修改
+
+第2步已经生成完整 caption（含朝向 + 场景描述）。如需批量改模板：
 
 ```bash
 python transfer_video_maker/caption一键修理/update_captions.py
 ```
-
-- 自动从第1步生成的 `direction.json` 读取朝向（west to east / east to west / ...）
-- 选数据集 → 选模板（或选自动匹配）→ 预览 → 确认
-- caption 格式：`"{视角}. The ego vehicle is traveling from {朝向}. {场景描述}"`
-
-**朝向怎么对应上的**：caption文件名 `004_id45_seg01.json` → 自动找 `segment_pipeline/output/scene004/vehicle45_seg01/direction.json`
 
 ---
 

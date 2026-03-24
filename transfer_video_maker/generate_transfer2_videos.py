@@ -91,22 +91,42 @@ def parse_args():
 
 
 # ============================================================
+# 场景描述（描述目标 RGB 输出，与 update_captions.py 保持一致）
+# ============================================================
+
+SCENE_DESCRIPTION = (
+    "Northern Chinese suburban intersection captured in early spring. "
+    "Clear daytime conditions with bright blue sky and soft natural sunlight casting gentle shadows. "
+    "Wide multi-lane asphalt road surface in good condition with crisp white lane markings, "
+    "directional arrows, and crosswalk patterns. Beige and tan colored high-rise residential "
+    "apartment buildings line both sides of the street, typical of Chinese suburban architecture. "
+    "Rows of bare deciduous trees with leafless branches stand along the sidewalks, characteristic "
+    "of late winter to early spring season. White painted metal safety railings separate the road "
+    "from pedestrian areas. Green traffic signals mounted on overhead poles with directional signs. "
+    "Street lamp posts visible along the road. Occasional mixed traffic including sedans, SUVs, "
+    "buses, trucks, and non-motorized road users such as pedestrians, cyclists, and electric "
+    "tricycles. Clean urban environment with well-maintained infrastructure."
+)
+
+_CAPTION_TEMPLATE = '{view_prefix}. The ego vehicle is traveling from {direction}. ' + SCENE_DESCRIPTION
+
+# ============================================================
 # 投影类型 → 默认子目录映射
 # ============================================================
 
 PROJECT_TYPE_DEFAULTS = {
     'basic':      {'control_subdir': 'proj',    'control_input_type': 'basic',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
     'blur':       {'control_subdir': 'proj',    'control_input_type': 'blur',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
     'blur_dense': {'control_subdir': 'proj',    'control_input_type': 'blur_dense',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
     'depth':      {'control_subdir': 'depth',   'control_input_type': 'depth',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
     'depth_dense':{'control_subdir': 'depth',   'control_input_type': 'depth_dense',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
     'hdmap':      {'control_subdir': 'overlay', 'control_input_type': 'hdmap_bbox',
-                   'caption': '{view_prefix}. The ego vehicle is traveling from {direction}.'},
+                   'caption': _CAPTION_TEMPLATE},
 }
 
 
