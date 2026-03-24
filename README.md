@@ -14,15 +14,20 @@ python -m segment_pipeline.segment_pipeline --interactive
 - 自动生成 `pose.csv`、`direction.json`（朝向）、ego坐标系标注
 - 可选同时跑投影（basic/blur/depth/hdmap）
 
-### 第2步：生成控制头视频 + caption
+### 第2步：生成训练视频 + caption
 
 ```bash
-bash transfer_video_maker/generate_videos.sh
+python transfer_video_maker/generate_transfer2_videos.py \
+  --segments-dir segment_pipeline/output \
+  --project-type depth \
+  --output-dir transfer_video_maker/output/DepthSparse \
+  --fps 10
 ```
 
-- 选项目类型（或选7批量）→ 输入场景号 → 其余参数直接回车用默认
-- 默认配置：21帧/seg、4个seg、10fps、1280x720
-- 输出在 `transfer_video_maker/output/`，按控制头类型分目录
+- `--segments-dir`：第1步的输出目录，每个 seg 目录 = 一个视频（29帧，不需要手动指定帧数或seg数量）
+- `--project-type`：选哪种投影做控制输入（depth / depth_dense / blur / blur_dense / basic / hdmap）
+- 朝向自动从每个 seg 的 `direction.json` 读取，写入 caption
+- 输出在 `--output-dir`，按控制头类型分目录
 
 ### 第3步：caption 批量替换（含朝向）
 
