@@ -78,7 +78,7 @@ def build_transforms_from_annotations(label_files, timestamps, vehicle_id):
     """
     从标注文件构建 projector 所需的 transforms 列表
 
-    bbox 中心位姿取逆 = world2ego = world2lidar（bbox 中心即 LiDAR 位置）
+    变换链: world → car (bbox中心) → lidar (车顶, z偏移 height/2+0.25)
 
     Returns:
         transforms: [{'timestamp': ms, 'world2lidar': {'rotation': [...], 'translation': [...]}}]
