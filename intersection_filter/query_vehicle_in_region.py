@@ -99,37 +99,28 @@ def find_continuous_segments(frames_in_region, label_files_ts):
     找出连续的在区域内的片段（考虑中间可能短暂离开区域又回来的情况）
 
     Returns:
-        segments: [(start_ts, end_ts, frame_count), ...]
+        segments: [(start_ts, end_ts, frame_count, all_timestamps), ...]
     """
     if not frames_in_region:
         return []
 
-    # 构建时间戳集合
-    in_region_ts = set(f[0] for f in frames_in_region)
+    # 按时间顺序排列所有在区域内的时间戳
+    all_ts = sorted(set(f[0] for f in frames_in_region))
 
-    # 按时间顺序遍历，找连续的在区域内的片段
+    # 按间隔 >500ms 切分为连续片段
     segments = []
-    current_start = None
-    current_count = 0
+    current_ts_list = [all_ts[0]]
 
-    all_ts = sorted(in_region_ts)
-
-    for i, ts in enumerate(all_ts):
-        if current_start is None:
-            current_start = ts
-            current_count = 1
+    for i in range(1, len(all_ts)):
+        if all_ts[i] - all_ts[i - 1] > 500:
+            segments.append((current_ts_list[0], current_ts_list[-1],
+                             len(current_ts_list), current_ts_list))
+            current_ts_list = [all_ts[i]]
         else:
-            # 如果和上一个时间戳间隔太大（>500ms），认为是新段
-            prev_ts = all_ts[i - 1]
-            if ts - prev_ts > 500:
-                segments.append((current_start, prev_ts, current_count))
-                current_start = ts
-                current_count = 1
-            else:
-                current_count += 1
+            current_ts_list.append(all_ts[i])
 
-    if current_start is not None:
-        segments.append((current_start, all_ts[-1], current_count))
+    segments.append((current_ts_list[0], current_ts_list[-1],
+                     len(current_ts_list), current_ts_list))
 
     return segments
 
@@ -178,7 +169,7 @@ def main():
         segments = find_continuous_segments(frames_in_region, None)
 
         print(f"  连续片段数: {len(segments)}")
-        for i, (start_ts, end_ts, count) in enumerate(segments):
+        for i, (start_ts, end_ts, count, ts_list) in enumerate(segments):
             duration_ms = end_ts - start_ts
             enough = "YES" if count >= SEGMENT_LENGTH else "NO"
             n_segs = count // SEGMENT_LENGTH
@@ -187,11 +178,33 @@ def main():
                   f"够{SEGMENT_LENGTH}帧: {enough}"
                   + (f"  可分{n_segs}段" if n_segs > 0 else ""))
 
+            # 如果够29帧，打印每个29帧segment的时间戳范围
+            if n_segs > 0:
+                for s_idx in range(n_segs):
+                    seg_start = s_idx * SEGMENT_LENGTH
+                    seg_end = seg_start + SEGMENT_LENGTH
+                    seg_ts = ts_list[seg_start:seg_end]
+                    print(f"      seg{s_idx}: ts {seg_ts[0]} ~ {seg_ts[-1]}  "
+                          f"(间隔 {seg_ts[-1] - seg_ts[0]}ms)")
+
         # 总计
         total_possible_segs = n_in // SEGMENT_LENGTH
         enough_total = "YES" if n_in >= SEGMENT_LENGTH else "NO"
         print(f"  >> 总计: {n_in}帧在区域内, 够{SEGMENT_LENGTH}帧: {enough_total}, "
               f"可生成{total_possible_segs}个segment")
+
+        # 构建每个29帧segment的详细信息
+        seg29_details = []
+        for _start, _end, _count, _ts_list in segments:
+            n_s = _count // SEGMENT_LENGTH
+            for s_idx in range(n_s):
+                s_begin = s_idx * SEGMENT_LENGTH
+                s_slice = _ts_list[s_begin:s_begin + SEGMENT_LENGTH]
+                seg29_details.append({
+                    "start_ts": s_slice[0],
+                    "end_ts": s_slice[-1],
+                    "duration_ms": s_slice[-1] - s_slice[0],
+                })
 
         results.append({
             "clip": clip, "vid": vid, "label": label,
@@ -199,10 +212,11 @@ def main():
             "in_region": n_in,
             "enough_29": n_in >= SEGMENT_LENGTH,
             "possible_segments": total_possible_segs,
-            "segments": [
+            "continuous_segments": [
                 {"start_ts": s[0], "end_ts": s[1], "frames": s[2]}
                 for s in segments
-            ]
+            ],
+            "seg29": seg29_details,
         })
 
     # 汇总表格
@@ -214,9 +228,13 @@ def main():
             print(f"{r['clip']:>5} | {r['label']}{r['vid']:>5} | {'ERROR':>8} |")
             continue
         ts_range = ""
-        if r["in_region"] > 0 and "segments" in r:
+        if r.get("seg29"):
+            ranges = [f"seg{i}: {s['start_ts']}~{s['end_ts']}({s['duration_ms']}ms)"
+                      for i, s in enumerate(r["seg29"])]
+            ts_range = " | ".join(ranges)
+        elif r["in_region"] > 0 and "continuous_segments" in r:
             ranges = [f"{s['start_ts']}~{s['end_ts']}({s['frames']}f)"
-                      for s in r["segments"]]
+                      for s in r["continuous_segments"]]
             ts_range = " | ".join(ranges)
 
         print(f"{r['clip']:>5} | {r['label']}{r['vid']:>5} | "
