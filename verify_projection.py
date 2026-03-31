@@ -12,6 +12,7 @@ Usage:
 """
 
 import json
+import sys
 import cv2
 import yaml
 import numpy as np
@@ -19,12 +20,15 @@ from pathlib import Path
 import argparse
 from scipy.spatial.transform import Rotation as Rot
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import common_utils
+
 
 # ============================================================
 # 配置
 # ============================================================
 
-VEHICLE_CALIB_DIR = Path("/mnt/car_road_data_fix/support_info/NoEER705_v3/camera")
+VEHICLE_CALIB_DIR = Path(common_utils.VEHICLE_CALIB_DIR)
 
 VEHICLE_CAMERAS = {
     1: {"name": "FN", "resolution": (3840, 2160)},

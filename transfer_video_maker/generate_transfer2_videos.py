@@ -66,7 +66,7 @@ def parse_args():
 
     # ---- legacy 模式参数 ----
     parser.add_argument('--project-root', type=str,
-                        default='/mnt/zihanw/proj_utils_pro',
+                        default=str(Path(__file__).resolve().parent.parent),
                         help='[legacy] 项目根目录')
     parser.add_argument('--scenes', type=str, nargs='+',
                         help='[legacy] 场景ID列表')
