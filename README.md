@@ -1,7 +1,36 @@
-## 完整流程（2步）
+## 完整流程
+
+```
+intersection_filter (第0步, 前置)
+  → filtered_segments.json (29帧一段)
+
+segment_pipeline (第1步)
+  → pose.csv + annotations/ + direction.json + 投影图像
+
+transfer_video_maker (第2步)
+  → 训练视频 (.mp4) + caption (.json)
+```
 
 ```
 conda activate zihanw
+```
+
+### 第0步：路口筛选 + 轨迹分段（前置，通常只跑一次）
+
+```bash
+python intersection_filter/intersection_filter.py --step all
+```
+
+- 根据 4 个方向的参考车辆（REFERENCE_VEHICLES）定义路口矩形区域
+- 扫描所有场景，找出穿越路口的车辆轨迹
+- 切分为 29 帧一段的 segment
+- 输出 `intersection_filter/output/filtered_segments.json`（后续步骤的输入）
+- 同时输出 BEV 可视化 `bev_intersection_region.png`
+
+查询指定车辆在路口内的帧数和时间戳范围：
+
+```bash
+python intersection_filter/query_vehicle_in_region.py
 ```
 
 ### 第1步：Segment Pipeline（生成 pose + 朝向 + 标注）
