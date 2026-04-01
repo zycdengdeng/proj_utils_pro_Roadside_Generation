@@ -277,6 +277,10 @@ def verify_projection(annotations_dir, video_dir, output_dir):
                 if not any(corners_valid):
                     continue
 
+                # 至少需要两个面（5个以上角点）的投影才画，否则看起来像2D框
+                if sum(corners_valid) < 5:
+                    continue
+
                 # 缩放到视频帧分辨率
                 scaled_2d = []
                 for c in corners_2d:
@@ -297,8 +301,16 @@ def verify_projection(annotations_dir, video_dir, output_dir):
 
             annotated_frames.append(frame)
 
-        # 保存为视频
+        # 保存逐帧图像
         if annotated_frames:
+            frames_dir = output_dir / f"{cam_key}_frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for idx, f in enumerate(annotated_frames):
+                frame_path = frames_dir / f"{idx:03d}.jpg"
+                cv2.imwrite(str(frame_path), f)
+            print(f"  逐帧保存: {frames_dir}/ ({len(annotated_frames)} 帧)")
+
+            # 保存为视频
             out_path = output_dir / f"{cam_key}_verify.mp4"
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             h, w = annotated_frames[0].shape[:2]
@@ -306,11 +318,7 @@ def verify_projection(annotations_dir, video_dir, output_dir):
             for f in annotated_frames:
                 writer.write(f)
             writer.release()
-            print(f"  保存: {out_path}")
-
-            # 同时保存第一帧作为预览图
-            preview_path = output_dir / f"{cam_key}_preview.jpg"
-            cv2.imwrite(str(preview_path), annotated_frames[0])
+            print(f"  视频保存: {out_path}")
 
     print(f"\n验证完成！输出目录: {output_dir}")
 
