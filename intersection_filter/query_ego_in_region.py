@@ -43,9 +43,6 @@ QUERY_LIST = [
     {"clip": "088", "label": "Suv", "vehicle_id": 19},
 ]
 
-SEGMENT_LENGTH = 29
-
-
 def load_region():
     region_file = Path(__file__).resolve().parent / "output" / "intersection_region.json"
     if not region_file.exists():
@@ -154,25 +151,12 @@ def main():
 
         for i, ts_list in enumerate(segs):
             count = len(ts_list)
-            enough = count >= SEGMENT_LENGTH
-            n29 = count // SEGMENT_LENGTH
             print(f"  连续段{i}: {ts_list[0]} ~ {ts_list[-1]}  "
-                  f"({count}帧, {ts_list[-1]-ts_list[0]}ms)  "
-                  f"够29帧: {'YES' if enough else 'NO'}"
-                  + (f"  可分{n29}段" if n29 > 0 else ""))
-
-            seg29_list = []
-            for s in range(n29):
-                start = s * SEGMENT_LENGTH
-                sl = ts_list[start:start + SEGMENT_LENGTH]
-                print(f"    seg{s}: {sl[0]} ~ {sl[-1]} ({sl[-1]-sl[0]}ms)")
-                seg29_list.append({"start_ts": sl[0], "end_ts": sl[-1],
-                                   "duration_ms": sl[-1] - sl[0]})
+                  f"({count}帧, {ts_list[-1]-ts_list[0]}ms)")
 
             seg_details.append({
                 "start_ts": ts_list[0], "end_ts": ts_list[-1],
-                "frames": count, "enough_29": enough,
-                "seg29": seg29_list,
+                "frames": count,
             })
 
         results.append({
@@ -183,23 +167,21 @@ def main():
 
     # 汇总表
     print("\n" + "=" * 100)
-    print(f"{'Clip':>5} | {'采集车':>8} | {'clip帧':>6} | {'区域内':>6} | {'够29':>4} | {'29帧段时间戳范围'}")
+    print(f"{'Clip':>5} | {'采集车':>8} | {'clip帧':>6} | {'区域内':>6} | {'时间戳范围 (帧数)'}")
     print("-" * 100)
     for r in results:
         if "error" in r:
             print(f"{r['clip']:>5} | {r['ego']:>8} | {'ERR':>6} |")
             continue
 
-        seg29_info = ""
+        seg_info = ""
         for seg in r.get("segments", []):
-            for s29 in seg.get("seg29", []):
-                if seg29_info:
-                    seg29_info += " | "
-                seg29_info += f"{s29['start_ts']}~{s29['end_ts']}"
+            if seg_info:
+                seg_info += " | "
+            seg_info += f"{seg['start_ts']}~{seg['end_ts']}({seg['frames']}f)"
 
-        enough = any(s["enough_29"] for s in r.get("segments", []))
         print(f"{r['clip']:>5} | {r['ego']:>8} | {r['total']:>6} | "
-              f"{r['in_region']:>6} | {'Y' if enough else 'N':>4} | {seg29_info}")
+              f"{r['in_region']:>6} | {seg_info}")
     print("=" * 100)
 
     # 保存
