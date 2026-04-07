@@ -129,7 +129,7 @@ def project_and_draw(img, obj, cam, scale_x, scale_y):
     for i in range(8):
         if corners_ok[i]:
             pos = (int(corners_2d[i][0]), int(corners_2d[i][1]) - 5)
-            cv2.putText(img, f"Ped_{obj['id']}", pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.putText(img, f"{obj['label']}_{obj['id']}", pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             break
 
     return True
@@ -145,6 +145,8 @@ def main():
                         help='统计到哪个 seg')
     parser.add_argument('--output-dir', default='verify_pedestrian_output',
                         help='输出目录')
+    parser.add_argument('--label', type=str, default='Pedestrian',
+                        help='要验证的类别 (如 Pedestrian, Bus)')
     parser.add_argument('--frame-idx', type=int, default=14,
                         help='取第几帧 (默认中间帧14)')
     args = parser.parse_args()
@@ -177,7 +179,7 @@ def main():
         with open(ann_file) as f:
             ann = json.load(f)
 
-        peds = [obj for obj in ann.get('object', []) if obj['label'] == 'Pedestrian']
+        peds = [obj for obj in ann.get('object', []) if obj['label'] == args.label]
         if not peds:
             continue
 
