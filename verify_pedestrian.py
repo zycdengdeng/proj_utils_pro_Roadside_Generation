@@ -147,6 +147,8 @@ def main():
                         help='输出目录')
     parser.add_argument('--label', type=str, default='Pedestrian',
                         help='要验证的类别 (如 Pedestrian, Bus)')
+    parser.add_argument('--exclude-ego', action='store_true',
+                        help='排除自车 (从 seg 名提取 vehicle_id)')
     parser.add_argument('--frame-idx', type=int, default=14,
                         help='取第几帧 (默认中间帧14)')
     args = parser.parse_args()
@@ -179,7 +181,15 @@ def main():
         with open(ann_file) as f:
             ann = json.load(f)
 
-        peds = [obj for obj in ann.get('object', []) if obj['label'] == args.label]
+        # 从 seg 名提取 ego vehicle id (格式: {scene}_id{vid}_seg{NN})
+        ego_vid = None
+        if args.exclude_ego:
+            parts = seg_name.split('_id')
+            if len(parts) >= 2:
+                ego_vid = int(parts[1].split('_seg')[0])
+
+        peds = [obj for obj in ann.get('object', [])
+                if obj['label'] == args.label and (ego_vid is None or obj['id'] != ego_vid)]
         if not peds:
             continue
 
