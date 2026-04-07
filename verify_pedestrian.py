@@ -106,13 +106,24 @@ def project_and_draw(img, obj, cam, scale_x, scale_y):
     if sum(corners_ok) < 5:
         return False
 
+    # 检查投影后是否在画面内
+    valid_pts = [c for c, ok in zip(corners_2d, corners_ok) if ok]
+    xs = [p[0] for p in valid_pts]
+    ys = [p[1] for p in valid_pts]
+    img_h, img_w = img.shape[:2]
+
+    # 如果所有有效点都在画面外，跳过
+    if max(xs) < 0 or min(xs) > img_w or max(ys) < 0 or min(ys) > img_h:
+        return False
+
     # 画线
     color = (0, 255, 0)  # 绿色
+    thickness = max(2, int(min(img_w, img_h) / 500))  # 根据分辨率自适应线宽
     for i, j in BBOX_EDGES:
         if corners_ok[i] and corners_ok[j]:
             p1 = (int(corners_2d[i][0]), int(corners_2d[i][1]))
             p2 = (int(corners_2d[j][0]), int(corners_2d[j][1]))
-            cv2.line(img, p1, p2, color, 2)
+            cv2.line(img, p1, p2, color, thickness)
 
     # 标签
     for i in range(8):
