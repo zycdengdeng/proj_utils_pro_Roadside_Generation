@@ -141,6 +141,8 @@ def main():
                         help='生成视频根目录 (含 {seg_name}/ 子目录)')
     parser.add_argument('--segments-dir', default=str(Path(__file__).resolve().parent / 'segment_pipeline' / 'output'),
                         help='segment_pipeline 输出目录')
+    parser.add_argument('--start', default=None,
+                        help='从哪个 seg 开始 (如 026)')
     parser.add_argument('--end', default='025_id22_seg01',
                         help='统计到哪个 seg')
     parser.add_argument('--output-dir', default='verify_pedestrian_output',
@@ -164,7 +166,9 @@ def main():
         cam_calibs[cid] = load_cam_calib(cid)
 
     # 找有行人的 seg
-    all_segs = sorted([d.name for d in seg_root.iterdir() if d.is_dir() and d.name <= args.end])
+    all_segs = sorted([d.name for d in seg_root.iterdir()
+                       if d.is_dir() and d.name <= args.end
+                       and (args.start is None or d.name >= args.start)])
     count = 0
 
     for seg_name in all_segs:
