@@ -226,9 +226,11 @@ def main():
     parser.add_argument('--output-dir', default='verify_carside_ts_output',
                         help='输出目录')
     parser.add_argument('--offset-x', type=int, default=0,
-                        help='投影结果水平像素偏移（负=左移，正=右移）')
+                        help='投影结果水平像素偏移（负=左移，正=右移），仅对 --offset-cam 指定的相机生效')
     parser.add_argument('--offset-y', type=int, default=0,
-                        help='投影结果垂直像素偏移（负=上移，正=下移）')
+                        help='投影结果垂直像素偏移（负=上移，正=下移），仅对 --offset-cam 指定的相机生效')
+    parser.add_argument('--offset-cam', type=str, nargs='*', default=None,
+                        help='像素偏移只应用于哪些相机 (如 --offset-cam FL)，默认全部')
     parser.add_argument('--cam-filter', type=str, nargs='*', default=None,
                         help='只处理指定相机 (如 --cam-filter FL FW)')
     args = parser.parse_args()
@@ -289,10 +291,16 @@ def main():
         # 去畸变
         img = undistort_image(img, cam)
 
+        # 判断当前相机是否需要偏移
+        if args.offset_cam is None or cam_name in args.offset_cam:
+            ox, oy = args.offset_x, args.offset_y
+        else:
+            ox, oy = 0, 0
+
         # 先投影所有物体
         all_infos = []
         for obj in objects:
-            info = project_obj_to_2d(obj, cam, args.offset_x, args.offset_y)
+            info = project_obj_to_2d(obj, cam, ox, oy)
             if info:
                 all_infos.append(info)
 
