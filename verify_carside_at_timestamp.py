@@ -229,8 +229,8 @@ def main():
                         help='按相机设置像素偏移, 格式: CAM:dx,dy (如 --cam-offset FL:-50,0 FN:0,30)')
     parser.add_argument('--cam-filter', type=str, nargs='*', default=None,
                         help='只处理指定相机 (如 --cam-filter FL FW)')
-    parser.add_argument('--exclude-ids', type=int, nargs='*', default=None,
-                        help='排除指定物体ID (如 --exclude-ids 25 52)')
+    parser.add_argument('--exclude-ids', type=str, nargs='*', default=None,
+                        help='排除指定物体ID, 可按相机: --exclude-ids 25 或 --exclude-ids RL:25 RL:52')
     args = parser.parse_args()
 
     # 解析按相机的偏移
@@ -265,12 +265,19 @@ def main():
         ann = json.load(f)
 
     objects = ann.get('object', [])
+    print(f"物体数: {len(objects)}")
+
+    # 解析排除ID: 支持全局 (25) 和按相机 (RL:25)
+    global_exclude = set()
+    cam_exclude = {}  # {cam_name: set(ids)}
     if args.exclude_ids:
-        exclude_set = set(args.exclude_ids)
-        objects = [obj for obj in objects if obj.get('id') not in exclude_set]
-        print(f"物体数: {len(objects)} (排除ID: {args.exclude_ids})")
-    else:
-        print(f"物体数: {len(objects)}")
+        for item in args.exclude_ids:
+            if ':' in item:
+                cam, eid = item.split(':')
+                cam_exclude.setdefault(cam, set()).add(int(eid))
+            else:
+                global_exclude.add(int(item))
+        print(f"排除: 全局{global_exclude or '无'}, 按相机{dict((k,list(v)) for k,v in cam_exclude.items()) or '无'}")
 
     # 加载相机标定
     cam_calibs = {}
@@ -307,9 +314,14 @@ def main():
         # 按相机查找偏移
         ox, oy = cam_offsets.get(cam_name, (0, 0))
 
-        # 先投影所有物体
+        # 该相机需要排除的ID
+        this_cam_exclude = global_exclude | cam_exclude.get(cam_name, set())
+
+        # 先投影所有物体（排除指定ID）
         all_infos = []
         for obj in objects:
+            if obj.get('id') in this_cam_exclude:
+                continue
             info = project_obj_to_2d(obj, cam, ox, oy)
             if info:
                 all_infos.append(info)
