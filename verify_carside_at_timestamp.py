@@ -118,7 +118,7 @@ def undistort_image(img, cam):
     return cv2.undistort(img, cam['K'], cam['D'], None, cam['nK'])
 
 
-def project_and_draw(img, obj, cam):
+def project_and_draw(img, obj, cam, offset_x=0, offset_y=0):
     """投影3D框到去畸变后的图像上"""
     corners = bbox3d_corners(obj)
 
@@ -137,6 +137,12 @@ def project_and_draw(img, obj, cam):
         if valid[i]:
             uv = cam['nK'] @ pts_cam[i]
             corners_2d[i] = uv[:2] / uv[2]
+
+    # 应用像素偏移
+    for i in range(8):
+        if valid[i]:
+            corners_2d[i, 0] += offset_x
+            corners_2d[i, 1] += offset_y
 
     in_image = ((corners_2d[:, 0] >= 0) & (corners_2d[:, 0] < cam['w']) &
                 (corners_2d[:, 1] >= 0) & (corners_2d[:, 1] < cam['h']))
@@ -172,6 +178,12 @@ def main():
                         help='目标时间戳（毫秒，如 1743583130886）')
     parser.add_argument('--output-dir', default='verify_carside_ts_output',
                         help='输出目录')
+    parser.add_argument('--offset-x', type=int, default=0,
+                        help='投影结果水平像素偏移（负=左移，正=右移）')
+    parser.add_argument('--offset-y', type=int, default=0,
+                        help='投影结果垂直像素偏移（负=上移，正=下移）')
+    parser.add_argument('--cam-filter', type=str, nargs='*', default=None,
+                        help='只处理指定相机 (如 --cam-filter FL FW)')
     args = parser.parse_args()
 
     clip_dir = common_utils.find_scene_path(args.clip)
@@ -207,6 +219,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for cid, cam_name in CAMS.items():
+        if args.cam_filter and cam_name not in args.cam_filter:
+            continue
+
         cam = cam_calibs[cid]
         img_dir = car_image_dir / cam_name
 
@@ -229,7 +244,7 @@ def main():
 
         box_count = 0
         for obj in objects:
-            if project_and_draw(img, obj, cam):
+            if project_and_draw(img, obj, cam, args.offset_x, args.offset_y):
                 box_count += 1
 
         # 信息
