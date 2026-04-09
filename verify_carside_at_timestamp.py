@@ -62,11 +62,8 @@ def load_cam_calib(cam_id):
     t = np.array([ext['translation'][k] for k in ['x', 'y', 'z']])
     R = quat2R(q)
     w, h = RES[cam_id]
-    if cam_id in [2, 3, 4] and np.max(np.abs(D)) > 1:
-        nK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(K, D[:4], (w, h), np.eye(3), balance=0.0)
-    else:
-        nK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w, h), 0, (w, h))
-    return {'K': K, 'D': D, 'R': R, 't': t, 'nK': nK, 'w': w, 'h': h}
+    is_fisheye = cam_id in [2, 3, 4] and np.max(np.abs(D)) > 1
+    return {'K': K, 'D': D, 'R': R, 't': t, 'w': w, 'h': h, 'is_fisheye': is_fisheye}
 
 
 def bbox3d_corners(obj):
@@ -116,8 +113,10 @@ def find_nearest_label(label_dir, target_ts_sec):
 
 
 def project_and_draw(img, obj, cam):
-    """投影3D框到图像，参照路侧投影风格"""
+    """投影3D框到原始畸变图像上（带畸变投影，参照路侧投影风格）"""
     corners = bbox3d_corners(obj)
+
+    # lidar → camera
     Rl2c = cam['R'].T
     tl2c = -cam['R'].T @ cam['t']
     pts_cam = (Rl2c @ corners.T).T + tl2c
@@ -126,11 +125,19 @@ def project_and_draw(img, obj, cam):
     if sum(valid) < 2:
         return False
 
-    corners_2d = np.full((8, 2), -1.0)
-    for i in range(8):
-        if valid[i]:
-            uv = cam['nK'] @ pts_cam[i]
-            corners_2d[i] = uv[:2] / uv[2]
+    # 带畸变投影到像素坐标（直接投到原始图像上）
+    K = cam['K']
+    D = cam['D']
+    rvec = np.zeros(3)
+    tvec = np.zeros(3)
+
+    if cam['is_fisheye']:
+        uv_all, _ = cv2.fisheye.projectPoints(
+            pts_cam.reshape(-1, 1, 3), rvec, tvec, K, D[:4])
+    else:
+        uv_all, _ = cv2.projectPoints(
+            pts_cam.reshape(-1, 1, 3), rvec, tvec, K, D)
+    corners_2d = uv_all.reshape(-1, 2)
 
     in_image = ((corners_2d[:, 0] >= 0) & (corners_2d[:, 0] < cam['w']) &
                 (corners_2d[:, 1] >= 0) & (corners_2d[:, 1] < cam['h']))
