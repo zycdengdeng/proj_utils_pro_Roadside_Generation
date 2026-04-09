@@ -229,6 +229,8 @@ def main():
                         help='按相机设置像素偏移, 格式: CAM:dx,dy (如 --cam-offset FL:-50,0 FN:0,30)')
     parser.add_argument('--cam-filter', type=str, nargs='*', default=None,
                         help='只处理指定相机 (如 --cam-filter FL FW)')
+    parser.add_argument('--exclude-ids', type=int, nargs='*', default=None,
+                        help='排除指定物体ID (如 --exclude-ids 25 52)')
     args = parser.parse_args()
 
     # 解析按相机的偏移
@@ -263,7 +265,12 @@ def main():
         ann = json.load(f)
 
     objects = ann.get('object', [])
-    print(f"物体数: {len(objects)}")
+    if args.exclude_ids:
+        exclude_set = set(args.exclude_ids)
+        objects = [obj for obj in objects if obj.get('id') not in exclude_set]
+        print(f"物体数: {len(objects)} (排除ID: {args.exclude_ids})")
+    else:
+        print(f"物体数: {len(objects)}")
 
     # 加载相机标定
     cam_calibs = {}
