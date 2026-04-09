@@ -118,27 +118,29 @@ def undistort_image(img, cam):
     return cv2.undistort(img, cam['K'], cam['D'], None, cam['nK'])
 
 
-def project_and_draw(img, obj, cam, offset_x=0, offset_y=0):
-    """投影3D框到去畸变后的图像上"""
+def project_obj_to_2d(obj, cam, offset_x=0, offset_y=0):
+    """
+    投影物体到2D，返回投影信息（不画图）
+
+    Returns:
+        info dict or None (不可见时)
+    """
     corners = bbox3d_corners(obj)
 
-    # lidar → camera
     Rl2c = cam['R'].T
     tl2c = -cam['R'].T @ cam['t']
     pts_cam = (Rl2c @ corners.T).T + tl2c
 
     valid = pts_cam[:, 2] > 0.1
     if sum(valid) < 2:
-        return False
+        return None
 
-    # 用去畸变后的内参 nK 做线性投影
     corners_2d = np.full((8, 2), -1.0)
     for i in range(8):
         if valid[i]:
             uv = cam['nK'] @ pts_cam[i]
             corners_2d[i] = uv[:2] / uv[2]
 
-    # 应用像素偏移
     for i in range(8):
         if valid[i]:
             corners_2d[i, 0] += offset_x
@@ -149,7 +151,55 @@ def project_and_draw(img, obj, cam, offset_x=0, offset_y=0):
     drawable = valid & in_image
 
     if sum(drawable) < 2:
-        return False
+        return None
+
+    # 计算2D bbox (用可见点)
+    valid_pts = corners_2d[drawable]
+    x1, y1 = valid_pts.min(axis=0)
+    x2, y2 = valid_pts.max(axis=0)
+
+    # 物体中心深度
+    depth = np.mean(pts_cam[valid, 2])
+
+    return {
+        'obj': obj,
+        'corners_2d': corners_2d,
+        'valid': valid,
+        'drawable': drawable,
+        'bbox_2d': (x1, y1, x2, y2),
+        'depth': depth,
+    }
+
+
+def is_fully_occluded(info, all_infos):
+    """
+    判断一个物体是否被更近的物体完全遮挡
+
+    逻辑: 如果存在一个更近的物体，其2D bbox完全包含当前物体的2D bbox，则认为被遮挡
+    """
+    x1, y1, x2, y2 = info['bbox_2d']
+    depth = info['depth']
+
+    for other in all_infos:
+        if other is info:
+            continue
+        if other['depth'] >= depth:
+            continue  # 只看更近的物体
+
+        ox1, oy1, ox2, oy2 = other['bbox_2d']
+        # 判断当前物体的2D bbox是否被完全包含
+        if ox1 <= x1 and oy1 <= y1 and ox2 >= x2 and oy2 >= y2:
+            return True
+
+    return False
+
+
+def draw_obj(img, info):
+    """在图像上绘制一个已投影的物体"""
+    obj = info['obj']
+    corners_2d = info['corners_2d']
+    valid = info['valid']
+    drawable = info['drawable']
 
     color = get_color_by_id(obj.get('id', 0))
     label_text = f"{obj.get('label', '')}_{obj.get('id', '')}"
@@ -160,15 +210,12 @@ def project_and_draw(img, obj, cam, offset_x=0, offset_y=0):
             p2 = tuple(corners_2d[j].astype(int))
             cv2.line(img, p1, p2, color, 1)
 
-    # 标签
     for k in range(8):
         if drawable[k]:
             pos = tuple(corners_2d[k].astype(int))
             cv2.putText(img, label_text, (pos[0], pos[1] - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
             break
-
-    return True
 
 
 def main():
@@ -242,10 +289,22 @@ def main():
         # 去畸变
         img = undistort_image(img, cam)
 
-        box_count = 0
+        # 先投影所有物体
+        all_infos = []
         for obj in objects:
-            if project_and_draw(img, obj, cam, args.offset_x, args.offset_y):
-                box_count += 1
+            info = project_obj_to_2d(obj, cam, args.offset_x, args.offset_y)
+            if info:
+                all_infos.append(info)
+
+        # 过滤被完全遮挡的物体
+        visible_infos = [info for info in all_infos if not is_fully_occluded(info, all_infos)]
+
+        # 按深度从远到近画（远的先画，近的后画覆盖）
+        visible_infos.sort(key=lambda x: x['depth'], reverse=True)
+        box_count = 0
+        for info in visible_infos:
+            draw_obj(img, info)
+            box_count += 1
 
         # 信息
         info = f"Clip{args.clip} {cam_name} ts={args.timestamp} ({box_count} boxes)"
