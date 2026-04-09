@@ -225,15 +225,21 @@ def main():
                         help='目标时间戳（毫秒，如 1743583130886）')
     parser.add_argument('--output-dir', default='verify_carside_ts_output',
                         help='输出目录')
-    parser.add_argument('--offset-x', type=int, default=0,
-                        help='投影结果水平像素偏移（负=左移，正=右移），仅对 --offset-cam 指定的相机生效')
-    parser.add_argument('--offset-y', type=int, default=0,
-                        help='投影结果垂直像素偏移（负=上移，正=下移），仅对 --offset-cam 指定的相机生效')
-    parser.add_argument('--offset-cam', type=str, nargs='*', default=None,
-                        help='像素偏移只应用于哪些相机 (如 --offset-cam FL)，默认全部')
+    parser.add_argument('--cam-offset', type=str, nargs='*', default=None,
+                        help='按相机设置像素偏移, 格式: CAM:dx,dy (如 --cam-offset FL:-50,0 FN:0,30)')
     parser.add_argument('--cam-filter', type=str, nargs='*', default=None,
                         help='只处理指定相机 (如 --cam-filter FL FW)')
     args = parser.parse_args()
+
+    # 解析按相机的偏移
+    cam_offsets = {}
+    if args.cam_offset:
+        for item in args.cam_offset:
+            # 格式: FL:-50,0
+            cam, xy = item.split(':')
+            dx, dy = xy.split(',')
+            cam_offsets[cam] = (int(dx), int(dy))
+        print(f"像素偏移: {cam_offsets}")
 
     clip_dir = common_utils.find_scene_path(args.clip)
     if not clip_dir:
@@ -291,11 +297,8 @@ def main():
         # 去畸变
         img = undistort_image(img, cam)
 
-        # 判断当前相机是否需要偏移
-        if args.offset_cam is None or cam_name in args.offset_cam:
-            ox, oy = args.offset_x, args.offset_y
-        else:
-            ox, oy = 0, 0
+        # 按相机查找偏移
+        ox, oy = cam_offsets.get(cam_name, (0, 0))
 
         # 先投影所有物体
         all_infos = []
