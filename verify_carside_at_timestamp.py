@@ -62,8 +62,9 @@ def load_cam_calib(cam_id):
     t = np.array([ext['translation'][k] for k in ['x', 'y', 'z']])
     R = quat2R(q)
     w, h = RES[cam_id]
-    is_fisheye = cam_id in [2, 3, 4] and np.max(np.abs(D)) > 1
-    return {'K': K, 'D': D, 'R': R, 't': t, 'w': w, 'h': h, 'is_fisheye': is_fisheye}
+    # 所有相机都用 plumb_bob 去畸变
+    nK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w, h), 0, (w, h))
+    return {'K': K, 'D': D, 'R': R, 't': t, 'nK': nK, 'w': w, 'h': h}
 
 
 def bbox3d_corners(obj):
@@ -112,8 +113,13 @@ def find_nearest_label(label_dir, target_ts_sec):
     return best_file, best_diff
 
 
+def undistort_image(img, cam):
+    """去畸变图像 (plumb_bob 模型)"""
+    return cv2.undistort(img, cam['K'], cam['D'], None, cam['nK'])
+
+
 def project_and_draw(img, obj, cam):
-    """投影3D框到原始畸变图像上（带畸变投影，参照路侧投影风格）"""
+    """投影3D框到去畸变后的图像上"""
     corners = bbox3d_corners(obj)
 
     # lidar → camera
@@ -125,19 +131,12 @@ def project_and_draw(img, obj, cam):
     if sum(valid) < 2:
         return False
 
-    # 带畸变投影到像素坐标（直接投到原始图像上）
-    K = cam['K']
-    D = cam['D']
-    rvec = np.zeros(3)
-    tvec = np.zeros(3)
-
-    if cam['is_fisheye']:
-        uv_all, _ = cv2.fisheye.projectPoints(
-            pts_cam.reshape(-1, 1, 3), rvec, tvec, K, D[:4])
-    else:
-        uv_all, _ = cv2.projectPoints(
-            pts_cam.reshape(-1, 1, 3), rvec, tvec, K, D)
-    corners_2d = uv_all.reshape(-1, 2)
+    # 用去畸变后的内参 nK 做线性投影
+    corners_2d = np.full((8, 2), -1.0)
+    for i in range(8):
+        if valid[i]:
+            uv = cam['nK'] @ pts_cam[i]
+            corners_2d[i] = uv[:2] / uv[2]
 
     in_image = ((corners_2d[:, 0] >= 0) & (corners_2d[:, 0] < cam['w']) &
                 (corners_2d[:, 1] >= 0) & (corners_2d[:, 1] < cam['h']))
@@ -222,6 +221,9 @@ def main():
         img = cv2.imread(str(img_file))
         if img is None:
             continue
+
+        # 去畸变
+        img = undistort_image(img, cam)
 
         box_count = 0
         for obj in objects:
