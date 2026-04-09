@@ -218,6 +218,8 @@ def main():
             print(f"  {cam_name}: 未找到图像 (diff={img_diff:.3f}s)")
             continue
 
+        print(f"  {cam_name}: 图像 {img_file.name} (时间差: {img_diff*1000:.1f}ms)")
+
         img = cv2.imread(str(img_file))
         if img is None:
             continue
