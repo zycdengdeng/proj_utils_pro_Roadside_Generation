@@ -336,9 +336,7 @@ def main():
             draw_obj(img, info)
             box_count += 1
 
-        # 信息
-        info = f"Clip{args.clip} {cam_name} ts={args.timestamp} ({box_count} boxes)"
-        cv2.putText(img, info, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+
 
         out_path = output_dir / f"{args.clip}_{cam_name}_bbox.jpg"
         cv2.imwrite(str(out_path), img)
