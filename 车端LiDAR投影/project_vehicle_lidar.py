@@ -67,8 +67,8 @@ VEHICLE_CAMERAS = {
 NAME2ID = {v["name"]: k for k, v in VEHICLE_CAMERAS.items()}
 FISHEYE_CAM_IDS = {2, 3, 4}  # FW/FL/FR 是鱼眼
 
-# GT 图像时间戳匹配容差 (微秒)
-GT_MATCH_TOL_US = 100_000  # 100ms
+# GT 图像时间戳匹配容差 (微秒, 命令行可覆盖)
+DEFAULT_GT_MATCH_TOL_US = 200_000  # 200ms
 
 
 # ============================================================
@@ -145,24 +145,41 @@ def list_vehicle_pcds(scene_root):
     return files  # [(ts_us, Path), ...]
 
 
-def find_gt_image(gt_cam_dir, target_ts_us, tol_us=GT_MATCH_TOL_US):
-    """在某相机目录里找最接近 target_ts_us 的 GT 图像"""
+def list_gt_timestamps(gt_cam_dir):
+    """列出某相机 GT 目录下所有文件的时间戳 (按 ts_us 排序). 返回 [(ts_us, Path), ...]"""
     gt_cam_dir = Path(gt_cam_dir)
     if not gt_cam_dir.exists():
-        return None, None
-
-    best_path = None
-    best_diff = float('inf')
+        return []
+    items = []
     for f in gt_cam_dir.glob('*.jpg'):
         m = GT_TS_RE.search(f.name)
         if not m:
             continue
         ts_us = int(m.group(1)) * 1_000_000 + int(m.group(2))
+        items.append((ts_us, f))
+    items.sort()
+    return items
+
+
+def find_gt_image_from_cache(gt_items, target_ts_us, tol_us):
+    """
+    从已缓存的 (ts_us, Path) 列表里找最接近 target_ts_us 的 GT 图像
+
+    tol_us = 0 或 None 时不做容差检查, 总返回最近的
+    """
+    if not gt_items:
+        return None, None
+
+    best_path = None
+    best_diff = float('inf')
+    for ts_us, path in gt_items:
         diff = abs(ts_us - target_ts_us)
         if diff < best_diff:
             best_diff = diff
-            best_path = f
-    if best_path is None or best_diff > tol_us:
+            best_path = path
+    if best_path is None:
+        return None, None
+    if tol_us and tol_us > 0 and best_diff > tol_us:
         return None, best_diff
     return best_path, best_diff
 
@@ -280,21 +297,20 @@ def overlay_points_on_image(img, uv, colors, point_size=2, alpha=1.0):
 # 单帧 × 单相机 处理
 # ============================================================
 
-def process_one_camera(points_lidar, ts_us, calib, gt_root, out_dir,
+def process_one_camera(points_lidar, ts_us, calib, gt_items, out_dir,
                        near, far, point_size, alpha, auto_range,
-                       jpg_quality):
-    """处理单帧的单个相机, 写出叠加图. 返回 (cam_name, num_points, ok)"""
+                       jpg_quality, gt_tol_us):
+    """处理单帧的单个相机, 写出叠加图. 返回 (cam_name, num_points, ok, ts_diff_us)"""
     cam_name = calib['name']
 
     # 1. 找 GT 图像
-    gt_cam_dir = Path(gt_root) / cam_name
-    gt_path, ts_diff = find_gt_image(gt_cam_dir, ts_us)
+    gt_path, ts_diff = find_gt_image_from_cache(gt_items, ts_us, gt_tol_us)
     if gt_path is None:
-        return cam_name, 0, False
+        return cam_name, 0, False, ts_diff
 
     img = cv2.imread(str(gt_path))
     if img is None:
-        return cam_name, 0, False
+        return cam_name, 0, False, ts_diff
 
     # 2. 去畸变
     und_img, new_K = undistort_image(img, calib)
@@ -307,7 +323,7 @@ def process_one_camera(points_lidar, ts_us, calib, gt_root, out_dir,
         out_path = out_dir / f"{ts_us // 1000}.jpg"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_path), und_img, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
-        return cam_name, 0, True
+        return cam_name, 0, True, ts_diff
 
     # 4. 裁剪到图像范围
     in_img = (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
@@ -317,7 +333,7 @@ def process_one_camera(points_lidar, ts_us, calib, gt_root, out_dir,
         out_path = out_dir / f"{ts_us // 1000}.jpg"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_path), und_img, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
-        return cam_name, 0, True
+        return cam_name, 0, True, ts_diff
 
     # 5. 排序: 先画远的, 后画近的, 这样近处的点不会被远处点遮盖
     order = np.argsort(-z_cam)  # 从远到近
@@ -342,7 +358,7 @@ def process_one_camera(points_lidar, ts_us, calib, gt_root, out_dir,
     out_path = out_dir / f"{ts_us // 1000}.jpg"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), overlay, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
-    return cam_name, int(uv.shape[0]), True
+    return cam_name, int(uv.shape[0]), True, ts_diff
 
 
 # ============================================================
@@ -368,22 +384,64 @@ def run_scene(scene_id, args):
 
     # 列出 PCD
     pcd_files = list_vehicle_pcds(scene_root)
-    if args.max_frames > 0:
-        pcd_files = pcd_files[:args.max_frames]
+    if len(pcd_files) == 0:
+        print(f"[ERROR] 场景 {scene_id} 下没有 PCD 文件")
+        return
+
+    # 预先列出每个相机的 GT 图像 (避免每帧都 glob 一次)
+    gt_cache = {}
+    for cid in cam_ids:
+        cam_name = VEHICLE_CAMERAS[cid]['name']
+        items = list_gt_timestamps(gt_root / cam_name)
+        gt_cache[cid] = items
+        if not items:
+            print(f"[WARN] 相机 {cam_name} 的 GT 目录为空或不存在: {gt_root / cam_name}")
+
+    # 把容差从 ms 转成 us
+    gt_tol_us = int(args.gt_tolerance_ms * 1000) if args.gt_tolerance_ms > 0 else 0
+
+    # 如果要求对齐, 先截断 PCD 列表到 GT 覆盖区间
+    align_info = ""
+    if args.align_to_gt:
+        all_gt_ts = [ts for cid in cam_ids for ts, _ in gt_cache[cid]]
+        if all_gt_ts:
+            gt_min = min(all_gt_ts)
+            gt_max = max(all_gt_ts)
+            pad = gt_tol_us if gt_tol_us > 0 else 0
+            before = len(pcd_files)
+            pcd_files = [(ts, p) for ts, p in pcd_files
+                         if gt_min - pad <= ts <= gt_max + pad]
+            align_info = f"  [align-to-gt] {before} → {len(pcd_files)} 帧 (截断到 GT 覆盖区间)"
+
+    # 应用 start / max-frames
     if args.start_frame > 0:
         pcd_files = pcd_files[args.start_frame:]
+    if args.max_frames > 0:
+        pcd_files = pcd_files[:args.max_frames]
 
     output_root = Path(args.output) / scene_id
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # 打印概览, 包括时间范围
+    pcd_ts_list = [ts for ts, _ in pcd_files]
+    all_gt_ts = [ts for cid in cam_ids for ts, _ in gt_cache[cid]]
     print(f"\n[场景 {scene_id}] {paths['scene_name']}")
-    print(f"  相机:    {args.cameras}")
-    print(f"  PCD 数:  {len(pcd_files)}")
-    print(f"  深度范围: " +
+    print(f"  相机:        {args.cameras}")
+    print(f"  PCD:         {len(pcd_files)} 帧 (筛选后)")
+    if pcd_ts_list:
+        print(f"               时间戳 {pcd_ts_list[0]/1e6:.3f} ~ {pcd_ts_list[-1]/1e6:.3f} s")
+    if all_gt_ts:
+        print(f"  GT 图像:     共 {len(all_gt_ts)} 张 (各相机合计)")
+        print(f"               时间戳 {min(all_gt_ts)/1e6:.3f} ~ {max(all_gt_ts)/1e6:.3f} s")
+    if align_info:
+        print(align_info)
+    print(f"  GT 容差:     " + (f"{args.gt_tolerance_ms:.0f} ms" if gt_tol_us > 0
+                                else "无 (总是取最近图像)"))
+    print(f"  深度范围:    " +
           (f"自适应 (per-frame 2%~98% 分位)" if args.auto_range
            else f"固定 [{args.near}, {args.far}] m"))
-    print(f"  点大小:  {args.point_size} px,  alpha = {args.alpha}")
-    print(f"  输出到:  {output_root}")
+    print(f"  点大小:      {args.point_size} px,  alpha = {args.alpha}")
+    print(f"  输出到:      {output_root}")
     print()
 
     t0 = time.time()
@@ -411,25 +469,31 @@ def run_scene(scene_id, args):
                 out_dir = output_root / cam_name
                 fut = ex.submit(
                     process_one_camera,
-                    points_lidar, ts_us, calibs[cid], gt_root, out_dir,
+                    points_lidar, ts_us, calibs[cid], gt_cache[cid], out_dir,
                     args.near, args.far, args.point_size, args.alpha,
-                    args.auto_range, args.jpg_quality,
+                    args.auto_range, args.jpg_quality, gt_tol_us,
                 )
                 futures[fut] = cam_name
             for fut in futures:
-                cam_name, npts, ok = fut.result()
-                per_cam_results[cam_name] = (npts, ok)
+                cam_name, npts, ok, ts_diff = fut.result()
+                per_cam_results[cam_name] = (npts, ok, ts_diff)
 
         # 进度打印
-        cams_ok = [c for c, (_, ok) in per_cam_results.items() if ok]
-        cams_miss_gt = [c for c, (_, ok) in per_cam_results.items() if not ok]
-        npts_total = sum(n for n, _ in per_cam_results.values())
+        cams_ok = [c for c, (_, ok, _) in per_cam_results.items() if ok]
+        miss_parts = []
+        for c, (_, ok, diff) in per_cam_results.items():
+            if not ok:
+                if diff is None:
+                    miss_parts.append(f"{c}(无GT目录)")
+                else:
+                    miss_parts.append(f"{c}(Δ{diff/1000:.0f}ms)")
+        npts_total = sum(n for n, _, _ in per_cam_results.values())
         total_pts += npts_total
         total_imgs += len(cams_ok)
         print(f"  [{idx:3d}/{len(pcd_files)}] {pcd_path.name}  "
               f"pts={points_lidar.shape[0]:6d}  proj={npts_total:6d}  "
               f"OK={len(cams_ok)}/{len(cam_ids)}" +
-              (f"  缺GT={cams_miss_gt}" if cams_miss_gt else ""))
+              (f"  缺GT=[{', '.join(miss_parts)}]" if miss_parts else ""))
 
     dt = time.time() - t0
     print(f"\n[完成] 用时 {dt:.1f}s, 共写出 {total_imgs} 张图, 总投影点 {total_pts}")
@@ -462,9 +526,15 @@ def parse_args():
                    help='点对底图的不透明度 (0~1), 默认 1.0 = 完全覆盖')
 
     p.add_argument('--start-frame', type=int, default=0,
-                   help='从第 N 帧开始 (0-based, 默认 0)')
+                   help='从第 N 帧开始 (0-based, 默认 0); 在 --align-to-gt 之后生效')
     p.add_argument('--max-frames', type=int, default=0,
-                   help='最多处理多少帧 (0 = 不限制)')
+                   help='最多处理多少帧 (0 = 不限制); 在 --align-to-gt 之后生效')
+    p.add_argument('--gt-tolerance-ms', type=float, default=200.0,
+                   help='PCD 和 GT 图像时间戳匹配容差 (毫秒, 默认 200); '
+                        '设 0 表示不做容差检查, 总是用最近的图像 (和其他投影模块一致)')
+    p.add_argument('--align-to-gt', action='store_true',
+                   help='自动把 PCD 列表截断到 GT 图像覆盖的时间区间内 '
+                        '(避免处理没有对应图像的 PCD)')
 
     p.add_argument('--jpg-quality', type=int, default=92,
                    help='输出 JPG 质量 (默认 92)')
