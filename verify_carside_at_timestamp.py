@@ -194,7 +194,7 @@ def is_fully_occluded(info, all_infos):
     return False
 
 
-def draw_obj(img, info):
+def draw_obj(img, info, line_width=2):
     """在图像上绘制一个已投影的物体"""
     obj = info['obj']
     corners_2d = info['corners_2d']
@@ -208,7 +208,7 @@ def draw_obj(img, info):
         if valid[i] and valid[j]:
             p1 = tuple(corners_2d[i].astype(int))
             p2 = tuple(corners_2d[j].astype(int))
-            cv2.line(img, p1, p2, color, 1)
+            cv2.line(img, p1, p2, color, line_width, cv2.LINE_AA)
 
     for k in range(8):
         if drawable[k]:
@@ -231,6 +231,8 @@ def main():
                         help='只处理指定相机 (如 --cam-filter FL FW)')
     parser.add_argument('--exclude-ids', type=str, nargs='*', default=None,
                         help='排除指定物体ID, 可按相机: --exclude-ids 25 或 --exclude-ids RL:25 RL:52')
+    parser.add_argument('--line-width', type=int, default=2,
+                        help='3D框线宽 (默认 2, 可调大到 3 或 4)')
     args = parser.parse_args()
 
     # 解析按相机的偏移
@@ -333,7 +335,7 @@ def main():
         visible_infos.sort(key=lambda x: x['depth'], reverse=True)
         box_count = 0
         for info in visible_infos:
-            draw_obj(img, info)
+            draw_obj(img, info, line_width=args.line_width)
             box_count += 1
 
 
