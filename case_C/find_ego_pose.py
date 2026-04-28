@@ -52,6 +52,33 @@ def list_label_timestamps(label_dir):
     return out
 
 
+# R2A 红框（与 build_virtual_observers.py 保持一致）
+R2A_REGION = {'x_min': -95.1, 'x_max': -30.7, 'y_min': -30.6, 'y_max': 9.8}
+
+
+def fit_radius_score(x, y, radius, region=R2A_REGION):
+    """如果 ego 周围 ±radius 完全落在区域内，返回离最近一面墙的距离 (越大越好)；否则返回负值"""
+    margins = (
+        x - region['x_min'] - radius,
+        region['x_max'] - x - radius,
+        y - region['y_min'] - radius,
+        region['y_max'] - y - radius,
+    )
+    return min(margins)
+
+
+def find_ego_at_timestamp(label_dir, ts, ego_id):
+    f, _ = find_label_file(label_dir, ts)
+    if f is None:
+        return None
+    with open(f) as fh:
+        anno = json.load(fh)
+    obj = next((o for o in anno.get('object', []) if o.get('id') == ego_id), None)
+    if obj is None:
+        return None
+    return f, obj
+
+
 def main():
     ap = argparse.ArgumentParser(description="Case C: 找 ego 在 t* 的世界 pose")
     ap.add_argument('--scene', default='008', help='场景前缀，默认 008')
@@ -59,6 +86,9 @@ def main():
                     help='ego 车辆 ID (默认从 carid.json 读取)')
     ap.add_argument('--timestamp', type=int, default=None,
                     help='t* 毫秒时间戳 (默认取该场景标注的中间一帧)')
+    ap.add_argument('--fit-radius', type=float, default=None,
+                    help='自动扫描所有时间戳, 选 ego 离 R2A 红框四壁都 >= 此半径的 t*; '
+                         '若指定则覆盖 --timestamp')
     ap.add_argument('--output', default=str(Path(__file__).resolve().parent / 'output' / 'ego_pose_t_star.json'),
                     help='输出 JSON 路径')
     args = ap.parse_args()
@@ -81,7 +111,26 @@ def main():
     all_ts = list_label_timestamps(label_dir)
     if not all_ts:
         sys.exit(f"❌ 标注目录为空: {label_dir}")
-    if args.timestamp is None:
+
+    if args.fit_radius is not None:
+        # 扫描所有时间戳, 找 ego 离红框四壁都至少 fit_radius 米的 t* (取 margin 最大的)
+        print(f"扫描 {len(all_ts)} 帧, 寻找 ego 离 R2A 红框四壁 >= {args.fit_radius}m 的 t* ...")
+        best = None  # (margin, ts, obj, file)
+        for ts in all_ts:
+            res = find_ego_at_timestamp(label_dir, ts, ego_id)
+            if res is None:
+                continue
+            f, obj = res
+            margin = fit_radius_score(obj['x'], obj['y'], args.fit_radius)
+            if margin >= 0 and (best is None or margin > best[0]):
+                best = (margin, ts, obj, f)
+        if best is None:
+            sys.exit(f"❌ 没有任何一帧能让 R={args.fit_radius}m 的观察车全在红框内, "
+                     f"请减小 --fit-radius 或换场景")
+        ts_star = best[1]
+        print(f"  → 命中 t*={ts_star}  ego=({best[2]['x']:.2f}, {best[2]['y']:.2f})  "
+              f"min margin to wall = {best[0]:.2f}m")
+    elif args.timestamp is None:
         ts_star = all_ts[len(all_ts) // 2]
         print(f"未指定 --timestamp，自动选中间帧 t* = {ts_star} (共 {len(all_ts)} 帧)")
     else:
