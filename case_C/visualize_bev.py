@@ -134,10 +134,12 @@ def main():
                 (ex, ey), textcoords='offset points', xytext=(8, 8),
                 fontsize=9, color='red', fontweight='bold')
 
-    # 4 观察车 (跟随 ego 平移; 画 t* 时刻位置 + 各自轨迹)
+    # 4 观察车 (跟随 ego 平移 + 与 ego 同向行驶; 画 t* 时刻位置 + 各自轨迹)
     color_map = {'N': 'blue', 'E': 'green', 'S': 'purple', 'W': 'orange'}
     for ob in observers:
-        ox, oy, yaw_o = ob['x'], ob['y'], ob['yaw']
+        ox, oy = ob['x'], ob['y']
+        # observer 朝向 = ego 在 t* 的 yaw (与 ego 同向行驶, 不指向 ego)
+        yaw_o = yaw_e
         in_box = ob['in_R2A_region']
         base_color = color_map.get(ob['name'], 'blue')
         color = base_color if in_box else 'red'
@@ -155,7 +157,7 @@ def main():
                    edgecolors='black', linewidths=1)
         ax.arrow(ox, oy, 5 * math.cos(yaw_o), 5 * math.sin(yaw_o),
                  head_width=0.7, head_length=0.9, fc=color, ec=color, zorder=8)
-        ax.plot([ox, ex], [oy, ey], '--', color=base_color, lw=0.8, alpha=0.5)
+        ax.plot([ox, ex], [oy, ey], '--', color=base_color, lw=0.6, alpha=0.3)
         flag = '' if in_box else ' [OUT OF REGION]'
         ax.annotate(f"{ob['name']}{flag}\n({ox:.1f}, {oy:.1f})",
                     (ox, oy), textcoords='offset points', xytext=(8, -12),

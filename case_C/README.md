@@ -1,13 +1,17 @@
 # Case C - 4-Vantage Counterfactual Pose Query
 
-让 4 辆**虚拟观察车**以 ego (真采集车) 为圆心、跟随 ego 一起平移（与 ego
-保持相对静止），在 N/E/S/W 4 个偏移位置各跑一次 segment_pipeline，得到 4
+让 4 辆**虚拟观察车**以 ego (真采集车) 为圆心、跟随 ego 一起平移并与 ego
+**同向行驶**，在 N/E/S/W 4 个偏移位置各跑一次 segment_pipeline，得到 4
 套独立的 7-相机 × 29-帧 控制条件 (blur / depth / hdmap)，最终训练 4 段
 "反事实"假想视频。
 
 > **关键点**：每辆观察车跑自己的一段 29 帧视频；4 段视频分开喂给 R2A
-> 推理。每帧 `observer_world(t) = ego_world(t) + 恒定 offset`，所以观察
-> 车与 ego 同步运动，"行驶"看起来正确。观察车朝向恒定指向 ego。
+> 推理。每帧:
+> - 位置 `observer_world(t) = ego_world(t) + 世界系恒定 offset`
+> - 朝向 `observer_yaw(t)   = ego_yaw(t)`  (与 ego 平行行驶, 不指向 ego)
+>
+> 观察车用原车端 7 相机内外参（FN/FW/FL/FR/RL/RR/RN），就是一辆"在 ego
+> 旁 12m 处一起开"的标准车。
 
 ## 流程
 
@@ -111,15 +115,16 @@ bash transfer_video_maker/generate_videos.sh
   "label_files": ["…/t_0.json", …],              // 同上, 用于 hdmap 投影读真物体
   "virtual_poses": [                              // 每帧一个观察车 pose
     {"x": ego.x_0 + offset.x, "y": ego.y_0 + offset.y, "z": ego.z_0 + offset.z,
-     "yaw": const, "roll": 0, "pitch": 0, "vehicle_height": 1.6},
-    …
+     "yaw": ego.yaw_0, "roll": ego.roll_0, "pitch": ego.pitch_0,
+     "vehicle_height": 1.6},
+    …                                            // yaw/roll/pitch 逐帧取自 ego(t)
   ],
   "case_C": {
     "observer_name": "N",
     "ego_reference_id": 82,
     "t_star": 1742879650843,
     "offset_world": [0.0, 12.0, 0.0],
-    "mode": "follow_ego_constant_offset"
+    "mode": "follow_ego_parallel_orientation"
   }
 }
 ```
@@ -152,4 +157,5 @@ bash transfer_video_maker/generate_videos.sh
   若 ego 位置导致出框，用 `find_ego_pose.py --fit-radius 12` 自动挑帧。
 - 跟随观察车的 `direction.json` 沿用 ego 的位移方向（W2E/E2W/N2S/S2N），
   与真采集车一致。
-- 观察车朝向恒定指向 ego；因 offset 在世界系恒定，相对几何永不漂移。
+- 观察车与 ego 同向行驶（per-frame yaw=ego_yaw）；offset 在世界系恒定，
+  所以相对位置不变；ego 转弯时观察车也跟着同步转，formation 保持刚性。
