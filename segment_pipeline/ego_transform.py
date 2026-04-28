@@ -115,6 +115,50 @@ def get_world2lidar_transform(annotation, vehicle_id):
 get_world2ego_transform = get_world2lidar_transform
 
 
+def get_world2lidar_transform_from_pose(world_pos, world_yaw,
+                                        roll=0.0, pitch=0.0,
+                                        vehicle_height=1.6,
+                                        lidar_height_offset=0.25):
+    """
+    从给定的世界系 pose 直接计算 world → 虚拟 LiDAR 变换。
+    用于 Case C 等"虚拟观察车"，跳过路侧标注查找。
+
+    与 get_world2lidar_transform 的差别：不查标注，pose 由调用方提供。
+    数学过程一致：
+        car2world = euler2rotmat(roll, pitch, yaw),  t = world_pos
+        world2car = car2world 取逆
+        lidar2car: R = I,  t = [0, 0, vehicle_height/2 + lidar_height_offset]
+        world2lidar = car2lidar @ world2car
+
+    Args:
+        world_pos: (x, y, z) 世界坐标 (list/tuple/ndarray)
+        world_yaw: 弧度
+        roll, pitch: 弧度，默认 0
+        vehicle_height: 虚拟车身高，默认 1.6 m
+        lidar_height_offset: lidar 在 bbox 顶部上方的偏移，默认 0.25 m
+
+    Returns:
+        R_world2lidar: (3,3)
+        t_world2lidar: (3,1)
+    """
+    R_car2world = euler2rotmat(roll, pitch, world_yaw)
+    t_car2world = np.array(world_pos, dtype=float).reshape(3, 1)
+
+    R_world2car = R_car2world.T
+    t_world2car = -R_world2car @ t_car2world
+
+    R_lidar2car = np.eye(3)
+    t_lidar2car = np.array([0.0, 0.0, vehicle_height / 2.0 + lidar_height_offset]).reshape(3, 1)
+
+    R_car2lidar = R_lidar2car.T  # = I
+    t_car2lidar = -R_car2lidar @ t_lidar2car
+
+    R_world2lidar = R_car2lidar @ R_world2car
+    t_world2lidar = R_car2lidar @ t_world2car + t_car2lidar
+
+    return R_world2lidar, t_world2lidar
+
+
 def get_world2ego_as_rodrigues(annotation, vehicle_id):
     """
     同 get_world2lidar_transform，但返回罗德里格斯旋转向量（用于投影模块兼容）
@@ -131,6 +175,25 @@ def get_world2ego_as_rodrigues(annotation, vehicle_id):
 
     rotate, _ = cv2.Rodrigues(R_world2lidar)
     return rotate, t_world2lidar, world_pos, world_yaw, vehicle
+
+
+def get_world2lidar_rodrigues_from_pose(world_pos, world_yaw,
+                                        roll=0.0, pitch=0.0,
+                                        vehicle_height=1.6,
+                                        lidar_height_offset=0.25):
+    """
+    与 get_world2lidar_transform_from_pose 同语义，但旋转以罗德里格斯向量返回，
+    供投影模块（消费 cv2.Rodrigues）使用。
+
+    Returns:
+        rotate: (3,1) 罗德里格斯
+        trans: (3,1)
+    """
+    R_world2lidar, t_world2lidar = get_world2lidar_transform_from_pose(
+        world_pos, world_yaw, roll, pitch, vehicle_height, lidar_height_offset
+    )
+    rotate, _ = cv2.Rodrigues(R_world2lidar)
+    return rotate, t_world2lidar
 
 
 def points_world_to_ego(points, R_world2lidar, t_world2lidar):

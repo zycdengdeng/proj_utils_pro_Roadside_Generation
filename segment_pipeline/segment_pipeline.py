@@ -118,6 +118,7 @@ def process_single_segment(segment, ref_vectors, output_dir, projection_types=No
     seg_idx = segment.get('segment_index', 0)
     timestamps = segment['timestamps']
     label_files = segment['label_files']
+    virtual_pose = segment.get('virtual_pose')  # Case C: 虚拟观察车 pose（可选）
 
     seg_name = make_seg_name(scene_id, vehicle_id, seg_idx)
     seg_output = Path(output_dir) / seg_name
@@ -126,13 +127,17 @@ def process_single_segment(segment, ref_vectors, output_dir, projection_types=No
     print(f"处理: {seg_name}")
     print(f"  scene={scene_id}, vehicle={vehicle_id}, seg_idx={seg_idx}")
     print(f"  帧数: {len(timestamps)}, 输出: {seg_output}")
+    if virtual_pose is not None:
+        print(f"  virtual_pose: x={virtual_pose['x']:.2f}, y={virtual_pose['y']:.2f}, "
+              f"z={virtual_pose['z']:.2f}, yaw={virtual_pose['yaw']:.3f}")
     print(f"{'─'*60}")
 
     # Step 1: 生成 pose.csv
     print("\n[1/4] 生成 pose.csv ...")
     pose_path = seg_output / "pose.csv"
     poses, missing = generate_pose_csv(
-        label_files, timestamps, vehicle_id, pose_path
+        label_files, timestamps, vehicle_id, pose_path,
+        virtual_pose=virtual_pose,
     )
 
     if not poses:
@@ -143,7 +148,8 @@ def process_single_segment(segment, ref_vectors, output_dir, projection_types=No
     print("\n[2/4] 转换标注到 ego 坐标系 ...")
     annotations_dir = seg_output / "annotations"
     convert_segment_annotations(
-        label_files, timestamps, vehicle_id, annotations_dir
+        label_files, timestamps, vehicle_id, annotations_dir,
+        virtual_pose=virtual_pose,
     )
 
     # Step 3: 检测方向

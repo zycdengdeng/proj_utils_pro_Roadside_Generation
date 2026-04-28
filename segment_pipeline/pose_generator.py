@@ -62,7 +62,8 @@ def extract_ego_pose_from_annotation(annotation_path, vehicle_id):
     return None
 
 
-def generate_pose_csv(label_files, timestamps, vehicle_id, output_path):
+def generate_pose_csv(label_files, timestamps, vehicle_id, output_path,
+                      virtual_pose=None):
     """
     从多帧标注生成 pose CSV
 
@@ -71,6 +72,8 @@ def generate_pose_csv(label_files, timestamps, vehicle_id, output_path):
         timestamps: 对应的时间戳列表 (毫秒, int)
         vehicle_id: ego 车辆 ID
         output_path: 输出 CSV 文件路径
+        virtual_pose: 可选，dict {x, y, z, roll, pitch, yaw}。若提供则跳过标注查找，
+                      所有 29 帧 pose 取同一个虚拟值 (Case C 静止观察车)。
 
     Returns:
         poses: 提取的 pose 列表 (用于后续方向推算)
@@ -82,12 +85,28 @@ def generate_pose_csv(label_files, timestamps, vehicle_id, output_path):
     poses = []
     missing_frames = []
 
+    if virtual_pose is not None:
+        roll = float(virtual_pose.get('roll', 0.0))
+        pitch = float(virtual_pose.get('pitch', 0.0))
+        yaw = float(virtual_pose['yaw'])
+        x = float(virtual_pose['x'])
+        y = float(virtual_pose['y'])
+        z = float(virtual_pose['z'])
+        qx, qy, qz, qw = euler_to_quaternion(roll, pitch, yaw)
+
     with open(output_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'frame_id'])
 
         for i, (label_file, ts) in enumerate(zip(label_files, timestamps)):
-            pose = extract_ego_pose_from_annotation(label_file, vehicle_id)
+            if virtual_pose is not None:
+                pose = {
+                    'x': x, 'y': y, 'z': z,
+                    'roll': roll, 'pitch': pitch, 'yaw': yaw,
+                    'qx': qx, 'qy': qy, 'qz': qz, 'qw': qw,
+                }
+            else:
+                pose = extract_ego_pose_from_annotation(label_file, vehicle_id)
 
             if pose is None:
                 print(f"  警告: 帧 {i} ({ts}) 中未找到车辆 {vehicle_id}")
@@ -117,7 +136,8 @@ def generate_pose_csv(label_files, timestamps, vehicle_id, output_path):
                 'yaw': pose['yaw'],
             })
 
-    print(f"  pose.csv: {len(poses)}/{len(timestamps)} 帧")
+    print(f"  pose.csv: {len(poses)}/{len(timestamps)} 帧"
+          + ("  (virtual_pose)" if virtual_pose is not None else ""))
     if missing_frames:
         print(f"  缺失帧: {missing_frames}")
 

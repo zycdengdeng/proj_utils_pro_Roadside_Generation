@@ -15,7 +15,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import common_utils
-from segment_pipeline.ego_transform import get_world2ego_as_rodrigues
+from segment_pipeline.ego_transform import (
+    get_world2ego_as_rodrigues,
+    get_world2lidar_rodrigues_from_pose,
+)
 
 
 # 投影类型配置
@@ -74,16 +77,43 @@ PROJECTION_TYPES = {
 PROJECTION_CHOICES = ['basic', 'blur', 'blur_dense', 'depth', 'depth_dense', 'hdmap']
 
 
-def build_transforms_from_annotations(label_files, timestamps, vehicle_id):
+def build_transforms_from_annotations(label_files, timestamps, vehicle_id,
+                                      virtual_pose=None):
     """
-    从标注文件构建 projector 所需的 transforms 列表
+    从标注文件（或虚拟观察车 pose）构建 projector 所需的 transforms 列表
 
     变换链: world → car (bbox中心) → lidar (车顶, z偏移 height/2+0.25)
+
+    Args:
+        label_files, timestamps, vehicle_id: 同原参数
+        virtual_pose: 可选 dict {x,y,z,roll,pitch,yaw}。若提供则全部 29 帧使用同一个
+                      world2lidar（来自 virtual_pose），不读标注，跳过 ego id 查找。
 
     Returns:
         transforms: [{'timestamp': ms, 'world2lidar': {'rotation': [...], 'translation': [...]}}]
     """
     transforms = []
+
+    if virtual_pose is not None:
+        rotate, trans = get_world2lidar_rodrigues_from_pose(
+            world_pos=[virtual_pose['x'], virtual_pose['y'], virtual_pose['z']],
+            world_yaw=float(virtual_pose['yaw']),
+            roll=float(virtual_pose.get('roll', 0.0)),
+            pitch=float(virtual_pose.get('pitch', 0.0)),
+            vehicle_height=float(virtual_pose.get('vehicle_height', 1.6)),
+        )
+        rotation_list = rotate.flatten().tolist()
+        translation_list = trans.flatten().tolist()
+        for ts in timestamps:
+            transforms.append({
+                'timestamp': ts,
+                'world2lidar': {
+                    'rotation': rotation_list,
+                    'translation': translation_list,
+                }
+            })
+        return transforms
+
     for label_file, ts in zip(label_files, timestamps):
         with open(label_file, 'r') as f:
             annotation = json.load(f)
@@ -165,6 +195,7 @@ def run_projection_for_segment(segment, projection_types, output_dir, num_thread
 
     Args:
         segment: segment dict (from filtered_segments.json)
+                 可选字段 'virtual_pose'：dict {x,y,z,roll,pitch,yaw}，提供则使用虚拟观察车
         projection_types: list of projection type names (e.g., ['basic', 'depth'])
         output_dir: segment output directory (e.g., output/004_id45_seg01/)
         num_threads: threads per frame for camera processing
@@ -173,6 +204,7 @@ def run_projection_for_segment(segment, projection_types, output_dir, num_thread
     vehicle_id = segment['vehicle_id']
     timestamps = segment['timestamps']
     label_files = segment['label_files']
+    virtual_pose = segment.get('virtual_pose')
 
     # 获取场景路径
     scene_paths = common_utils.get_scene_paths(scene_id)
@@ -181,7 +213,9 @@ def run_projection_for_segment(segment, projection_types, output_dir, num_thread
         return
 
     # 构建 transforms (world2ego = world2lidar)
-    transforms = build_transforms_from_annotations(label_files, timestamps, vehicle_id)
+    transforms = build_transforms_from_annotations(
+        label_files, timestamps, vehicle_id, virtual_pose=virtual_pose
+    )
     if not transforms:
         print(f"  错误: 无法构建变换矩阵")
         return

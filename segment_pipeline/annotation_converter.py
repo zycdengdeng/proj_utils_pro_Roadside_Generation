@@ -9,7 +9,10 @@ import json
 import numpy as np
 from pathlib import Path
 
-from .ego_transform import get_world2ego_transform
+from .ego_transform import (
+    get_world2ego_transform,
+    get_world2lidar_transform_from_pose,
+)
 
 
 def transform_object_to_ego_frame(obj, R_world2lidar, t_world2lidar):
@@ -66,14 +69,17 @@ def transform_object_to_ego_frame(obj, R_world2lidar, t_world2lidar):
     }
 
 
-def convert_single_frame(annotation_path, vehicle_id, output_path):
+def convert_single_frame(annotation_path, vehicle_id, output_path,
+                         virtual_pose=None):
     """
     转换单帧标注到 ego LiDAR 坐标系
 
     Args:
         annotation_path: 路侧标注 JSON 路径
-        vehicle_id: ego 车辆 ID
+        vehicle_id: ego 车辆 ID（仅在非虚拟模式下用于排除 ego 自身）
         output_path: 输出 JSON 路径
+        virtual_pose: 可选 dict {x,y,z,roll,pitch,yaw}。若提供则使用虚拟观察车作为 ego，
+                      此时所有标注里的物体（含真实采集车）都被转换到虚拟观察车 lidar 系。
 
     Returns:
         num_objects: 转换的物体数量, -1 表示失败
@@ -81,19 +87,27 @@ def convert_single_frame(annotation_path, vehicle_id, output_path):
     with open(annotation_path, 'r') as f:
         annotation = json.load(f)
 
-    # 获取 world2ego 变换（车体坐标系，不含 LiDAR 偏移）
-    try:
-        R_world2ego, t_world2ego, world_pos, world_yaw, ego_obj = get_world2ego_transform(
-            annotation, vehicle_id
+    if virtual_pose is not None:
+        R_world2ego, t_world2ego = get_world2lidar_transform_from_pose(
+            world_pos=[virtual_pose['x'], virtual_pose['y'], virtual_pose['z']],
+            world_yaw=float(virtual_pose['yaw']),
+            roll=float(virtual_pose.get('roll', 0.0)),
+            pitch=float(virtual_pose.get('pitch', 0.0)),
+            vehicle_height=float(virtual_pose.get('vehicle_height', 1.6)),
         )
-    except ValueError as e:
-        print(f"  跳过: {e}")
-        return -1
+    else:
+        try:
+            R_world2ego, t_world2ego, world_pos, world_yaw, ego_obj = get_world2ego_transform(
+                annotation, vehicle_id
+            )
+        except ValueError as e:
+            print(f"  跳过: {e}")
+            return -1
 
-    # 转换所有非 ego 物体
+    # 转换所有物体；非虚拟模式下排除 ego 自身
     objects_ego = []
     for obj in annotation.get('object', []):
-        if obj['id'] == vehicle_id:
+        if virtual_pose is None and obj['id'] == vehicle_id:
             continue  # 排除 ego 自身
 
         obj_ego = transform_object_to_ego_frame(
@@ -120,7 +134,8 @@ def convert_single_frame(annotation_path, vehicle_id, output_path):
     return len(objects_ego)
 
 
-def convert_segment_annotations(label_files, timestamps, vehicle_id, output_dir):
+def convert_segment_annotations(label_files, timestamps, vehicle_id, output_dir,
+                                virtual_pose=None):
     """
     转换一个 segment 的所有帧标注
 
@@ -129,6 +144,7 @@ def convert_segment_annotations(label_files, timestamps, vehicle_id, output_dir)
         timestamps: 时间戳列表
         vehicle_id: ego 车辆 ID
         output_dir: 输出目录
+        virtual_pose: 可选 dict，提供则所有帧都用虚拟观察车作为 ego
 
     Returns:
         success_count: 成功转换的帧数
@@ -139,9 +155,12 @@ def convert_segment_annotations(label_files, timestamps, vehicle_id, output_dir)
     success_count = 0
     for label_file, ts in zip(label_files, timestamps):
         output_path = output_dir / f"{ts}.json"
-        num_objects = convert_single_frame(label_file, vehicle_id, output_path)
+        num_objects = convert_single_frame(
+            label_file, vehicle_id, output_path, virtual_pose=virtual_pose
+        )
         if num_objects >= 0:
             success_count += 1
 
-    print(f"  annotations: {success_count}/{len(timestamps)} 帧, 输出到 {output_dir}")
+    print(f"  annotations: {success_count}/{len(timestamps)} 帧, 输出到 {output_dir}"
+          + ("  (virtual_pose)" if virtual_pose is not None else ""))
     return success_count
