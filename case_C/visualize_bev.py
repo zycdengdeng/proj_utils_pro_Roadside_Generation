@@ -71,6 +71,8 @@ def main():
     here = Path(__file__).resolve().parent
     ap = argparse.ArgumentParser()
     ap.add_argument('--ego-pose', default=str(here / 'output' / 'ego_pose_t_star.json'))
+    ap.add_argument('--ego-trajectory', default=str(here / 'output' / 'ego_trajectory.json'),
+                    help='29 帧 ego 轨迹 (find_ego_pose 输出)')
     ap.add_argument('--observers', default=str(here / 'output' / 'virtual_observers.json'))
     ap.add_argument('--output', default=str(here / 'output' / 'bev_observers.png'))
     ap.add_argument('--with-pcd', action='store_true', help='叠加 t* 时刻的 PCD 灰底')
@@ -82,6 +84,13 @@ def main():
         ego = json.load(f)
     with open(args.observers) as f:
         observers = json.load(f)['observers']
+
+    # 可选 ego 轨迹 (find_ego_pose 现在会写)
+    trajectory = None
+    traj_path = Path(args.ego_trajectory)
+    if traj_path.exists():
+        with open(traj_path) as f:
+            trajectory = json.load(f)
 
     fig, ax = plt.subplots(figsize=(12, 10))
 
@@ -106,10 +115,18 @@ def main():
                                          f"x[{R2A_REGION['x_min']},{R2A_REGION['x_max']}] "
                                          f"y[{R2A_REGION['y_min']},{R2A_REGION['y_max']}]"))
 
-    # ego (红圆 + yaw 箭头)
+    # ego trajectory (如果有, 画成红色折线)
+    if trajectory is not None and trajectory.get('frames'):
+        traj_x = [fr['x'] for fr in trajectory['frames']]
+        traj_y = [fr['y'] for fr in trajectory['frames']]
+        ax.plot(traj_x, traj_y, '-', color='red', lw=1.2, alpha=0.7,
+                label=f"ego trajectory ({len(traj_x)} frames)", zorder=6)
+        ax.scatter(traj_x, traj_y, s=12, c='red', alpha=0.4, zorder=6)
+
+    # ego (红圆 + yaw 箭头) — t* 时刻的位置
     ex, ey = ego['x'], ego['y']
     ax.scatter([ex], [ey], s=220, c='red', zorder=8,
-               edgecolors='black', linewidths=1.2, label='ego (real capture car)')
+               edgecolors='black', linewidths=1.2, label='ego @ t*')
     yaw_e = ego.get('yaw', 0.0)
     ax.arrow(ex, ey, 3 * math.cos(yaw_e), 3 * math.sin(yaw_e),
              head_width=0.6, head_length=0.8, fc='red', ec='red', zorder=9)
@@ -117,22 +134,32 @@ def main():
                 (ex, ey), textcoords='offset points', xytext=(8, 8),
                 fontsize=9, color='red', fontweight='bold')
 
-    # 4 观察车 (蓝箭头指向 ego)
+    # 4 观察车 (跟随 ego 平移; 画 t* 时刻位置 + 各自轨迹)
+    color_map = {'N': 'blue', 'E': 'green', 'S': 'purple', 'W': 'orange'}
     for ob in observers:
         ox, oy, yaw_o = ob['x'], ob['y'], ob['yaw']
         in_box = ob['in_R2A_region']
-        color = 'blue' if in_box else 'orange'
+        base_color = color_map.get(ob['name'], 'blue')
+        color = base_color if in_box else 'red'
+
+        # observer 跟随轨迹 (offset 在世界系中固定 → 平移 ego 轨迹)
+        if trajectory is not None and trajectory.get('frames'):
+            offset_x = ox - ego['x']
+            offset_y = oy - ego['y']
+            ob_traj_x = [fr['x'] + offset_x for fr in trajectory['frames']]
+            ob_traj_y = [fr['y'] + offset_y for fr in trajectory['frames']]
+            ax.plot(ob_traj_x, ob_traj_y, '-', color=base_color, lw=1.0, alpha=0.5, zorder=5)
+            ax.scatter(ob_traj_x, ob_traj_y, s=8, c=base_color, alpha=0.3, zorder=5)
+
         ax.scatter([ox], [oy], s=160, c=color, marker='^', zorder=7,
                    edgecolors='black', linewidths=1)
-        # 朝向箭头 (5 m 长, 指向 ego 那一侧)
         ax.arrow(ox, oy, 5 * math.cos(yaw_o), 5 * math.sin(yaw_o),
                  head_width=0.7, head_length=0.9, fc=color, ec=color, zorder=8)
-        # 与 ego 的连线 (虚线)
-        ax.plot([ox, ex], [oy, ey], '--', color=color, lw=0.8, alpha=0.5)
+        ax.plot([ox, ex], [oy, ey], '--', color=base_color, lw=0.8, alpha=0.5)
         flag = '' if in_box else ' [OUT OF REGION]'
         ax.annotate(f"{ob['name']}{flag}\n({ox:.1f}, {oy:.1f})",
                     (ox, oy), textcoords='offset points', xytext=(8, -12),
-                    fontsize=9, color=color)
+                    fontsize=9, color=base_color)
 
     # 范围
     m = args.margin
@@ -142,8 +169,12 @@ def main():
     ax.grid(True, alpha=0.3)
     ax.set_xlabel('X (m, world)')
     ax.set_ylabel('Y (m, world)')
-    ax.set_title(f"Case C BEV  scene={ego['scene']}  t*={ego['timestamp']}  "
-                 f"R={ ((observers[0]['x']-ex)**2 + (observers[0]['y']-ey)**2)**0.5 :.1f}m")
+    n_traj = len(trajectory['frames']) if trajectory else 0
+    title = (f"Case C BEV  scene={ego['scene']}  t*={ego['timestamp']}  "
+             f"R={ ((observers[0]['x']-ex)**2 + (observers[0]['y']-ey)**2)**0.5 :.1f}m")
+    if n_traj:
+        title += f"  ({n_traj}-frame trajectories)"
+    ax.set_title(title)
     ax.legend(loc='upper left', fontsize=9)
 
     out = Path(args.output)

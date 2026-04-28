@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Case C - Step 1: 选定一个时间戳 t*，从 008 场景的路侧标注中读出"真采集车 ego"在该时刻的世界坐标 (x, y, z, yaw)。
+Case C - Step 1: 选 t* 并提取 ego 在 008 场景的"29 帧轨迹"。
 
-ego 车辆 ID 来源（按优先级）：
+后续 Case C 流水线让 4 辆虚拟观察车跟随真 ego 一起平移（offset 在世界系中恒定 →
+观察车与 ego 保持相对静止），所以这一步不只取单帧 t*，还要把 t* 周围连续 29 帧
+的 ego pose 一并写出，供 build_pseudo_segments 用作每帧 observer 位置的基准。
+
+ego 车辆 ID 来源 (优先级)：
   1) --ego-id 命令行参数
-  2) /mnt/car_road_data_fix/support_info/carid.json 中 008 对应的 nearest_carid
+  2) /mnt/car_road_data_fix/support_info/carid.json 中场景对应的 nearest_carid
 
-时间戳 t* 来源（按优先级）：
-  1) --timestamp <ms>
-  2) 标注目录中所有时间戳排序后的中间一个（保证 ego 在视野中央的常见情况）
+t* 选择 (优先级)：
+  1) --fit-radius R   扫描所有时间戳，挑 ego 离 R2A 红框四壁均 >= R 米的 t*
+  2) --timestamp <ms>
+  3) 默认：标注目录所有时间戳的中间一帧
 
-输出: case_C/output/ego_pose_t_star.json
+输出:
+  case_C/output/ego_pose_t_star.json   单帧 t* 的 ego 世界 pose (向后兼容)
+  case_C/output/ego_trajectory.json    29 帧 ego 世界 pose 列表 (供后续步骤用)
 """
 
 import argparse
@@ -90,7 +97,11 @@ def main():
                     help='自动扫描所有时间戳, 选 ego 离 R2A 红框四壁都 >= 此半径的 t*; '
                          '若指定则覆盖 --timestamp')
     ap.add_argument('--output', default=str(Path(__file__).resolve().parent / 'output' / 'ego_pose_t_star.json'),
-                    help='输出 JSON 路径')
+                    help='单帧 t* 输出 JSON 路径')
+    ap.add_argument('--num-frames', type=int, default=29,
+                    help='提取的 ego 轨迹帧数, 默认 29 (segment_pipeline 要求)')
+    ap.add_argument('--trajectory-output', default=None,
+                    help='29 帧 ego 轨迹输出 JSON 路径, 默认 case_C/output/ego_trajectory.json')
     args = ap.parse_args()
 
     scene_paths = get_scene_paths(args.scene)
@@ -175,6 +186,74 @@ def main():
         json.dump(out, f, indent=2)
     print(f"\n✓ 写入 {out_path}")
     print(json.dumps(out, indent=2))
+
+    # ---- 4) 提取 29 帧 ego 轨迹 (以 t* 为中心) ----
+    n = args.num_frames
+    try:
+        idx = all_ts.index(ts_label)
+    except ValueError:
+        # ts_label 来自 label_file.stem, 必在 all_ts 中; 兜底
+        idx = min(range(len(all_ts)), key=lambda i: abs(all_ts[i] - ts_label))
+
+    half = n // 2
+    start = max(0, idx - half)
+    end = start + n
+    if end > len(all_ts):
+        end = len(all_ts)
+        start = max(0, end - n)
+    window = all_ts[start:end]
+
+    if len(window) < n:
+        print(f"⚠️  场景仅有 {len(all_ts)} 帧, 取到 {len(window)} 帧 (要求 {n})")
+
+    frames = []
+    missing = []
+    for ts in window:
+        f, _ = find_label_file(label_dir, ts)
+        if f is None:
+            missing.append(ts)
+            continue
+        with open(f) as fh:
+            anno = json.load(fh)
+        obj = next((o for o in anno.get('object', []) if o.get('id') == ego_id), None)
+        if obj is None:
+            missing.append(ts)
+            continue
+        frames.append({
+            'timestamp': int(f.stem),
+            'label_file': str(f),
+            'x': float(obj['x']),
+            'y': float(obj['y']),
+            'z': float(obj['z']),
+            'yaw': float(obj.get('yaw', 0.0)),
+            'roll': float(obj.get('roll', 0.0)),
+            'pitch': float(obj.get('pitch', 0.0)),
+        })
+
+    if missing:
+        print(f"⚠️  {len(missing)} 帧没有 ego={ego_id} 的标注: {missing[:5]}{'...' if len(missing)>5 else ''}")
+    if len(frames) < n:
+        print(f"⚠️  只提取到 {len(frames)} 帧 ego pose (要求 {n}); 流水线仍按这些有效帧跑")
+
+    traj = {
+        'scene': args.scene,
+        'ego_vehicle_id': ego_id,
+        't_star': ts_label,
+        't_star_index_in_window': window.index(ts_label) if ts_label in window else -1,
+        'num_frames': len(frames),
+        'frames': frames,
+    }
+    traj_path = Path(args.trajectory_output) if args.trajectory_output else (out_path.parent / 'ego_trajectory.json')
+    traj_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(traj_path, 'w') as f:
+        json.dump(traj, f, indent=2)
+    print(f"\n✓ 写入 {traj_path}  共 {len(frames)} 帧 ego 轨迹")
+    if frames:
+        print(f"  起点: ({frames[0]['x']:.2f}, {frames[0]['y']:.2f})  ts={frames[0]['timestamp']}")
+        print(f"  终点: ({frames[-1]['x']:.2f}, {frames[-1]['y']:.2f})  ts={frames[-1]['timestamp']}")
+        dx = frames[-1]['x'] - frames[0]['x']
+        dy = frames[-1]['y'] - frames[0]['y']
+        print(f"  位移: dx={dx:+.2f}m, dy={dy:+.2f}m, |d|={(dx*dx+dy*dy)**0.5:.2f}m")
 
 
 if __name__ == '__main__':

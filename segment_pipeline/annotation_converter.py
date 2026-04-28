@@ -135,32 +135,43 @@ def convert_single_frame(annotation_path, vehicle_id, output_path,
 
 
 def convert_segment_annotations(label_files, timestamps, vehicle_id, output_dir,
-                                virtual_pose=None):
+                                virtual_pose=None, virtual_poses=None):
     """
     转换一个 segment 的所有帧标注
 
     Args:
-        label_files: 标注文件路径列表
-        timestamps: 时间戳列表
-        vehicle_id: ego 车辆 ID
-        output_dir: 输出目录
-        virtual_pose: 可选 dict，提供则所有帧都用虚拟观察车作为 ego
+        label_files, timestamps, vehicle_id, output_dir: 同前
+        virtual_pose: 单一 dict (静止观察车) 广播到所有帧
+        virtual_poses: 每帧一个 dict 的列表 (跟随观察车), 与 timestamps 等长
 
     Returns:
         success_count: 成功转换的帧数
     """
+    if virtual_pose is not None and virtual_poses is not None:
+        raise ValueError('virtual_pose 与 virtual_poses 不能同时指定')
+    if virtual_poses is not None and len(virtual_poses) != len(timestamps):
+        raise ValueError(f'virtual_poses 长度 {len(virtual_poses)} != timestamps 长度 {len(timestamps)}')
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     success_count = 0
-    for label_file, ts in zip(label_files, timestamps):
+    for i, (label_file, ts) in enumerate(zip(label_files, timestamps)):
         output_path = output_dir / f"{ts}.json"
+        if virtual_poses is not None:
+            vp = virtual_poses[i]
+        else:
+            vp = virtual_pose
         num_objects = convert_single_frame(
-            label_file, vehicle_id, output_path, virtual_pose=virtual_pose
+            label_file, vehicle_id, output_path, virtual_pose=vp
         )
         if num_objects >= 0:
             success_count += 1
 
-    print(f"  annotations: {success_count}/{len(timestamps)} 帧, 输出到 {output_dir}"
-          + ("  (virtual_pose)" if virtual_pose is not None else ""))
+    tag = ''
+    if virtual_poses is not None:
+        tag = '  (virtual_poses, per-frame)'
+    elif virtual_pose is not None:
+        tag = '  (virtual_pose, broadcast)'
+    print(f"  annotations: {success_count}/{len(timestamps)} 帧, 输出到 {output_dir}{tag}")
     return success_count

@@ -62,49 +62,60 @@ def extract_ego_pose_from_annotation(annotation_path, vehicle_id):
     return None
 
 
+def _virtual_pose_to_dict(vp):
+    """Normalize a virtual_pose dict to include quaternion fields."""
+    roll = float(vp.get('roll', 0.0))
+    pitch = float(vp.get('pitch', 0.0))
+    yaw = float(vp['yaw'])
+    qx, qy, qz, qw = euler_to_quaternion(roll, pitch, yaw)
+    return {
+        'x': float(vp['x']),
+        'y': float(vp['y']),
+        'z': float(vp['z']),
+        'roll': roll, 'pitch': pitch, 'yaw': yaw,
+        'qx': qx, 'qy': qy, 'qz': qz, 'qw': qw,
+    }
+
+
 def generate_pose_csv(label_files, timestamps, vehicle_id, output_path,
-                      virtual_pose=None):
+                      virtual_pose=None, virtual_poses=None):
     """
     从多帧标注生成 pose CSV
 
     Args:
-        label_files: 标注文件路径列表 (按时间排序)
-        timestamps: 对应的时间戳列表 (毫秒, int)
-        vehicle_id: ego 车辆 ID
-        output_path: 输出 CSV 文件路径
-        virtual_pose: 可选，dict {x, y, z, roll, pitch, yaw}。若提供则跳过标注查找，
-                      所有 29 帧 pose 取同一个虚拟值 (Case C 静止观察车)。
+        label_files, timestamps, vehicle_id, output_path: 同前
+        virtual_pose: 单一虚拟 pose dict (Case C 静止观察车), 与 timestamps 等长广播
+        virtual_poses: 每帧一个虚拟 pose dict 的列表 (Case C 跟随观察车),
+                       长度需与 timestamps 一致; 与 virtual_pose 互斥
 
     Returns:
-        poses: 提取的 pose 列表 (用于后续方向推算)
-        missing_frames: 缺失帧的索引列表
+        poses, missing_frames
     """
+    if virtual_pose is not None and virtual_poses is not None:
+        raise ValueError('virtual_pose 与 virtual_poses 不能同时指定')
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     poses = []
     missing_frames = []
 
-    if virtual_pose is not None:
-        roll = float(virtual_pose.get('roll', 0.0))
-        pitch = float(virtual_pose.get('pitch', 0.0))
-        yaw = float(virtual_pose['yaw'])
-        x = float(virtual_pose['x'])
-        y = float(virtual_pose['y'])
-        z = float(virtual_pose['z'])
-        qx, qy, qz, qw = euler_to_quaternion(roll, pitch, yaw)
+    # 把 virtual_pose (单一) 广播为列表, 后面统一按列表处理
+    vp_list = None
+    if virtual_poses is not None:
+        if len(virtual_poses) != len(timestamps):
+            raise ValueError(f'virtual_poses 长度 {len(virtual_poses)} != timestamps 长度 {len(timestamps)}')
+        vp_list = [_virtual_pose_to_dict(vp) for vp in virtual_poses]
+    elif virtual_pose is not None:
+        vp_list = [_virtual_pose_to_dict(virtual_pose)] * len(timestamps)
 
     with open(output_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'frame_id'])
 
         for i, (label_file, ts) in enumerate(zip(label_files, timestamps)):
-            if virtual_pose is not None:
-                pose = {
-                    'x': x, 'y': y, 'z': z,
-                    'roll': roll, 'pitch': pitch, 'yaw': yaw,
-                    'qx': qx, 'qy': qy, 'qz': qz, 'qw': qw,
-                }
+            if vp_list is not None:
+                pose = vp_list[i]
             else:
                 pose = extract_ego_pose_from_annotation(label_file, vehicle_id)
 
@@ -113,31 +124,26 @@ def generate_pose_csv(label_files, timestamps, vehicle_id, output_path,
                 missing_frames.append(i)
                 continue
 
-            # 时间戳转为秒 (float)
             ts_sec = ts / 1000.0
-
             writer.writerow([
                 f"{ts_sec:.2f}",
-                pose['x'],
-                pose['y'],
-                pose['z'],
-                pose['qx'],
-                pose['qy'],
-                pose['qz'],
-                pose['qw'],
+                pose['x'], pose['y'], pose['z'],
+                pose['qx'], pose['qy'], pose['qz'], pose['qw'],
                 'base_link'
             ])
 
             poses.append({
                 'timestamp': ts,
-                'x': pose['x'],
-                'y': pose['y'],
-                'z': pose['z'],
+                'x': pose['x'], 'y': pose['y'], 'z': pose['z'],
                 'yaw': pose['yaw'],
             })
 
-    print(f"  pose.csv: {len(poses)}/{len(timestamps)} 帧"
-          + ("  (virtual_pose)" if virtual_pose is not None else ""))
+    tag = ''
+    if virtual_poses is not None:
+        tag = '  (virtual_poses, per-frame)'
+    elif virtual_pose is not None:
+        tag = '  (virtual_pose, broadcast)'
+    print(f"  pose.csv: {len(poses)}/{len(timestamps)} 帧{tag}")
     if missing_frames:
         print(f"  缺失帧: {missing_frames}")
 
