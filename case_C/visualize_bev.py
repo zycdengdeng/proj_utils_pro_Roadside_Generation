@@ -75,7 +75,10 @@ def main():
                     help='29 帧 ego 轨迹 (find_ego_pose 输出)')
     ap.add_argument('--observers', default=str(here / 'output' / 'virtual_observers.json'))
     ap.add_argument('--output', default=str(here / 'output' / 'bev_observers.png'))
-    ap.add_argument('--with-pcd', action='store_true', help='叠加 t* 时刻的 PCD 灰底')
+    ap.add_argument('--with-pcd', dest='with_pcd', action='store_true', default=True,
+                    help='叠加 t* 时刻的 PCD 灰底 (默认开启)')
+    ap.add_argument('--no-pcd', dest='with_pcd', action='store_false',
+                    help='关闭 PCD 灰底')
     ap.add_argument('--margin', type=float, default=10.0,
                     help='坐标范围相对 R2A 框的扩展边距, 默认 10m')
     ap.add_argument('--exclude', nargs='+', default=[],
@@ -146,9 +149,6 @@ def main():
     yaw_e = ego.get('yaw', 0.0)
     ax.arrow(ex, ey, 3 * math.cos(yaw_e), 3 * math.sin(yaw_e),
              head_width=0.6, head_length=0.8, fc='red', ec='red', zorder=9)
-    ax.annotate(f"ego id={ego['ego_vehicle_id']}",
-                (ex, ey), textcoords='offset points', xytext=(8, 8),
-                fontsize=9, color='red', fontweight='bold')
 
     # 4 观察车 (跟随 ego 平移 + 与 ego 同向行驶; 画 t* 时刻位置 + 各自轨迹)
     color_map = {'N': 'blue', 'E': 'green', 'S': 'purple', 'W': 'orange'}
