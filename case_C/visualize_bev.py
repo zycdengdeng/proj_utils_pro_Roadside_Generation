@@ -78,12 +78,28 @@ def main():
     ap.add_argument('--with-pcd', action='store_true', help='叠加 t* 时刻的 PCD 灰底')
     ap.add_argument('--margin', type=float, default=10.0,
                     help='坐标范围相对 R2A 框的扩展边距, 默认 10m')
+    ap.add_argument('--exclude', nargs='+', default=[],
+                    help='不画的 observer 名 (如 --exclude S), 大小写不敏感')
+    ap.add_argument('--only', nargs='+', default=None,
+                    help='只画这些 observer (与 --exclude 互斥)')
     args = ap.parse_args()
 
     with open(args.ego_pose) as f:
         ego = json.load(f)
     with open(args.observers) as f:
         observers = json.load(f)['observers']
+
+    # 过滤 observers
+    excl = {n.upper() for n in args.exclude}
+    only = {n.upper() for n in args.only} if args.only else None
+    if only is not None and excl:
+        sys.exit('❌ --exclude 与 --only 不能同时使用')
+    if only is not None:
+        observers = [o for o in observers if o['name'].upper() in only]
+    elif excl:
+        observers = [o for o in observers if o['name'].upper() not in excl]
+    if not observers:
+        sys.exit('❌ 过滤后没有任何 observer')
 
     # 可选 ego 轨迹 (find_ego_pose 现在会写)
     trajectory = None
