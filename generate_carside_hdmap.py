@@ -208,10 +208,12 @@ def load_all_camera_calibs():
     return calibs
 
 
-def build_gt_cache(gt_images_dir):
+def build_gt_cache(gt_images_dir, cam_ids=None):
+    if cam_ids is None:
+        cam_ids = range(1, 8)
     cache = {}
     gt_dir = Path(gt_images_dir)
-    for cam_id in range(1, 8):
+    for cam_id in cam_ids:
         cam_name = VEHICLE_CAMERAS[cam_id]['name']
         cam_dir = gt_dir / cam_name
         items = []
@@ -390,15 +392,15 @@ def process_clip(clip_id, clip_dir, calibs, output_root, num_threads):
     if not segments:
         return 0
 
+    cam_id = 2  # FW only
     gt_images_dir = Path(clip_dir) / 'car' / 'images'
-    gt_cache = build_gt_cache(gt_images_dir)
+    gt_cache = build_gt_cache(gt_images_dir, cam_ids=[cam_id])
 
     total_imgs = 0
     for seg_idx, seg_frames in enumerate(segments):
         seg_name = f"seg{seg_idx:02d}"
         for frame_ts, ann_path in seg_frames:
             ts_str = ann_path.stem  # "1742878202.100021"
-            ts_ms = frame_ts * 1000  # 秒 → 毫秒 (for matching)
             ts_us = int(frame_ts * 1_000_000)
 
             frame_dir = output_root / clip_id / seg_name / ts_str
@@ -419,18 +421,10 @@ def process_clip(clip_id, clip_dir, calibs, output_root, num_threads):
                 color = LABEL_COLORS.get(obj.get('label', ''), LABEL_COLORS['unknown'])
                 objects_data.append({'corners': corners, 'color': color})
 
-            # 7 个相机并行
-            with ThreadPoolExecutor(max_workers=num_threads) as ex:
-                futures = []
-                for cam_id in range(1, 8):
-                    gt_path = find_nearest_gt(gt_cache[cam_id], ts_us)
-                    futures.append(ex.submit(
-                        process_camera, cam_id, objects_data, calibs[cam_id],
-                        gt_path, overlay_dir, gt_dir, bbox_on_gt_dir))
-                for fut in futures:
-                    fut.result()
-
-            total_imgs += 7
+            gt_path = find_nearest_gt(gt_cache[cam_id], ts_us)
+            process_camera(cam_id, objects_data, calibs[cam_id],
+                           gt_path, overlay_dir, gt_dir, bbox_on_gt_dir)
+            total_imgs += 1
 
         print(f"    {seg_name}: {len(seg_frames)} 帧完成")
     return total_imgs
