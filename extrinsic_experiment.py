@@ -235,6 +235,33 @@ def find_segment_frames(clip_id, vehicle_id):
 # 投影
 # ============================================================
 
+DIRECTION_TEXT = {
+    'W2E': 'west to east', 'E2W': 'east to west',
+    'N2S': 'north to south', 'S2N': 'south to north',
+}
+
+
+def detect_direction(label_files, vehicle_id):
+    """从首尾帧位置推算行驶方向"""
+    positions = []
+    for lf in [label_files[0], label_files[-1]]:
+        with open(lf) as f:
+            ann = json.load(f)
+        for obj in ann.get('object', []):
+            if obj['id'] == vehicle_id:
+                positions.append((obj['x'], obj['y']))
+                break
+    if len(positions) < 2:
+        return 'unknown direction'
+    dx = positions[1][0] - positions[0][0]
+    dy = positions[1][1] - positions[0][1]
+    if abs(dx) > abs(dy):
+        key = 'W2E' if dx > 0 else 'E2W'
+    else:
+        key = 'S2N' if dy > 0 else 'N2S'
+    return DIRECTION_TEXT.get(key, 'unknown direction')
+
+
 def build_transforms(label_files, timestamps, vehicle_id):
     transforms = []
     for lf, ts in zip(label_files, timestamps):
@@ -328,6 +355,30 @@ def run_projections(timestamps, label_files, scene_paths, calib_dir, transforms,
 # 视频生成 (FW only)
 # ============================================================
 
+CAMERA_VIEW_PREFIX = {
+    'ftheta_camera_front_tele_30fov': 'Front telephoto view',
+    'ftheta_camera_front_wide_120fov': 'Front wide view',
+    'ftheta_camera_cross_left_120fov': 'Left cross view',
+    'ftheta_camera_cross_right_120fov': 'Right cross view',
+    'ftheta_camera_rear_left_70fov': 'Rear left view',
+    'ftheta_camera_rear_right_70fov': 'Rear right view',
+    'ftheta_camera_rear_tele_30fov': 'Rear telephoto view',
+}
+
+SCENE_DESCRIPTION = (
+    "Northern Chinese suburban intersection captured in early spring. "
+    "Clear daytime conditions with bright blue sky and soft natural sunlight casting gentle shadows. "
+    "Wide multi-lane asphalt road surface in good condition with crisp white lane markings, "
+    "directional arrows, and crosswalk patterns. Beige and tan colored high-rise residential "
+    "apartment buildings line both sides of the street, typical of Chinese suburban architecture. "
+    "Rows of bare deciduous trees with leafless branches stand along the sidewalks, characteristic "
+    "of late winter to early spring season. White painted metal safety railings separate the road "
+    "from pedestrian areas. Green traffic signals mounted on overhead poles with directional signs. "
+    "Street lamp posts visible along the road. Occasional mixed traffic including sedans, SUVs, "
+    "buses, trucks, and non-motorized road users such as pedestrians, cyclists, and electric "
+    "tricycles. Clean urban environment with well-maintained infrastructure."
+)
+
 CONTROL_SUBDIRS = {
     'blur': 'proj',
     'depth': 'depth',
@@ -341,11 +392,17 @@ CONTROL_INPUT_NAMES = {
 }
 
 
-def generate_videos(output_dir, fps=10, resolution=(1280, 720)):
+def generate_videos(output_dir, direction='unknown direction', fps=10, resolution=(1280, 720)):
+    """
+    按 Transfer2 格式输出:
+      {output_dir}/videos/{transfer_cam}/{seg_name}.mp4
+      {output_dir}/control_input_{type}/{transfer_cam}/{seg_name}.mp4
+      {output_dir}/captions/{transfer_cam}/{seg_name}.json
+    """
     print(f"\n  生成视频 (7 相机, {resolution[0]}x{resolution[1]}, {fps}fps) ...")
 
     seg_name = output_dir.name
-    video_dir = output_dir / 'videos'
+    video_filename = f"{seg_name}.mp4"
 
     for proj_type in PROJECTION_CONFIGS:
         ctrl_subdir = CONTROL_SUBDIRS[proj_type]
@@ -358,22 +415,37 @@ def generate_videos(output_dir, fps=10, resolution=(1280, 720)):
             continue
 
         for cam_name in CAMERA_NAMES:
+            transfer_cam = CAMERA_NAME_MAPPING[cam_name]
+
             # GT 视频
             gt_paths = [d / 'gt' / f'{cam_name}.jpg' for d in ts_dirs
                         if (d / 'gt' / f'{cam_name}.jpg').exists()]
+            if gt_paths:
+                gt_video = output_dir / 'videos' / transfer_cam / video_filename
+                _make_video(gt_paths, gt_video, fps, resolution)
+
             # Control 视频
             ctrl_paths = [d / ctrl_subdir / f'{cam_name}.jpg' for d in ts_dirs
                           if (d / ctrl_subdir / f'{cam_name}.jpg').exists()]
-
-            if gt_paths:
-                gt_video = video_dir / cam_name / f'gt_{seg_name}.mp4'
-                _make_video(gt_paths, gt_video, fps, resolution)
-
             if ctrl_paths:
-                ctrl_video = video_dir / cam_name / f'control_{ctrl_name}_{seg_name}.mp4'
+                ctrl_video = output_dir / f'control_input_{ctrl_name}' / transfer_cam / video_filename
                 _make_video(ctrl_paths, ctrl_video, fps, resolution)
 
-    print(f"    视频输出: {video_dir}/")
+            # Caption JSON
+            view_prefix = CAMERA_VIEW_PREFIX.get(transfer_cam, cam_name)
+            caption = f"{view_prefix}. The ego vehicle is traveling from {direction}. {SCENE_DESCRIPTION}"
+            caption_path = output_dir / 'captions' / transfer_cam / f"{seg_name}.json"
+            caption_path.parent.mkdir(parents=True, exist_ok=True)
+            caption_data = {
+                "segment_name": seg_name,
+                "camera": transfer_cam,
+                "direction": direction,
+                "caption": caption,
+            }
+            with open(caption_path, 'w', encoding='utf-8') as f:
+                json.dump(caption_data, f, indent=2, ensure_ascii=False)
+
+    print(f"    输出: {output_dir}/{{videos,control_input_*,captions}}/")
 
 
 def _make_video(image_paths, output_path, fps, resolution):
@@ -446,9 +518,10 @@ def main():
     run_projections(timestamps, label_files, scene_paths, calib_dir,
                     transforms, args.vehicle_id, output_dir)
 
-    # 4. 生成视频
-    print(f"\n[4/4] 生成视频 ...")
-    generate_videos(output_dir)
+    # 4. 推算行驶方向 + 生成视频
+    direction = detect_direction(label_files, args.vehicle_id)
+    print(f"\n[4/4] 生成视频 (方向: {direction}) ...")
+    generate_videos(output_dir, direction=direction)
 
     # 清理临时目录
     shutil.rmtree(calib_dir)
