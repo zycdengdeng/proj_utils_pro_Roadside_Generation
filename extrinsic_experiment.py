@@ -44,6 +44,18 @@ DATASET_ROOT = Path(common_utils.DATASET_ROOT)
 VEHICLE_CALIB_DIR = Path(common_utils.VEHICLE_CALIB_DIR)
 
 SEGMENT_LENGTH = 29
+
+CAMERA_NAMES = ['FN', 'FW', 'FL', 'FR', 'RL', 'RR', 'RN']
+CAMERA_NAME_MAPPING = {
+    'FN': 'ftheta_camera_front_tele_30fov',
+    'FW': 'ftheta_camera_front_wide_120fov',
+    'FL': 'ftheta_camera_cross_left_120fov',
+    'FR': 'ftheta_camera_cross_right_120fov',
+    'RL': 'ftheta_camera_rear_left_70fov',
+    'RR': 'ftheta_camera_rear_right_70fov',
+    'RN': 'ftheta_camera_rear_tele_30fov',
+}
+
 PROJECTION_CONFIGS = {
     'blur': {
         'script': 'blur投影/undistort_projection_multithread_v2.py',
@@ -93,8 +105,6 @@ def find_closest_pcd(pcd_ts_map, target_ts, tolerance_ms=500):
         return pcd_ts_map[best_ts]
     return None
 
-TRANSFER_CAM_NAME = 'ftheta_camera_front_wide_120fov'
-FW_CAM_NAME = 'FW'
 
 
 # ============================================================
@@ -332,7 +342,10 @@ CONTROL_INPUT_NAMES = {
 
 
 def generate_videos(output_dir, fps=10, resolution=(1280, 720)):
-    print(f"\n  生成视频 (FW, {resolution[0]}x{resolution[1]}, {fps}fps) ...")
+    print(f"\n  生成视频 (7 相机, {resolution[0]}x{resolution[1]}, {fps}fps) ...")
+
+    seg_name = output_dir.name
+    video_dir = output_dir / 'videos'
 
     for proj_type in PROJECTION_CONFIGS:
         ctrl_subdir = CONTROL_SUBDIRS[proj_type]
@@ -344,25 +357,23 @@ def generate_videos(output_dir, fps=10, resolution=(1280, 720)):
         if not ts_dirs:
             continue
 
-        # GT 视频
-        gt_paths = [d / 'gt' / f'{FW_CAM_NAME}.jpg' for d in ts_dirs
-                     if (d / 'gt' / f'{FW_CAM_NAME}.jpg').exists()]
-        # Control 视频
-        ctrl_paths = [d / ctrl_subdir / f'{FW_CAM_NAME}.jpg' for d in ts_dirs
-                      if (d / ctrl_subdir / f'{FW_CAM_NAME}.jpg').exists()]
+        for cam_name in CAMERA_NAMES:
+            # GT 视频
+            gt_paths = [d / 'gt' / f'{cam_name}.jpg' for d in ts_dirs
+                        if (d / 'gt' / f'{cam_name}.jpg').exists()]
+            # Control 视频
+            ctrl_paths = [d / ctrl_subdir / f'{cam_name}.jpg' for d in ts_dirs
+                          if (d / ctrl_subdir / f'{cam_name}.jpg').exists()]
 
-        seg_name = output_dir.name
-        video_dir = output_dir / 'videos'
+            if gt_paths:
+                gt_video = video_dir / cam_name / f'gt_{seg_name}.mp4'
+                _make_video(gt_paths, gt_video, fps, resolution)
 
-        if gt_paths:
-            gt_video = video_dir / f'gt_{seg_name}.mp4'
-            _make_video(gt_paths, gt_video, fps, resolution)
+            if ctrl_paths:
+                ctrl_video = video_dir / cam_name / f'control_{ctrl_name}_{seg_name}.mp4'
+                _make_video(ctrl_paths, ctrl_video, fps, resolution)
 
-        if ctrl_paths:
-            ctrl_video = video_dir / f'control_{ctrl_name}_{seg_name}.mp4'
-            _make_video(ctrl_paths, ctrl_video, fps, resolution)
-
-    print(f"    视频输出: {output_dir / 'videos'}/")
+    print(f"    视频输出: {video_dir}/")
 
 
 def _make_video(image_paths, output_path, fps, resolution):
