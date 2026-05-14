@@ -44,7 +44,54 @@ DATASET_ROOT = Path(common_utils.DATASET_ROOT)
 VEHICLE_CALIB_DIR = Path(common_utils.VEHICLE_CALIB_DIR)
 
 SEGMENT_LENGTH = 29
-PROJECTION_TYPES = ['blur', 'depth', 'hdmap']
+PROJECTION_CONFIGS = {
+    'blur': {
+        'script': 'blur投影/undistort_projection_multithread_v2.py',
+        'class_name': 'BlurProjectorMultiThread',
+        'input': 'pcd',
+        'needs_roadside_images': True,
+        'control_subdir': 'proj',
+        'control_input_type': 'blur',
+    },
+    'depth': {
+        'script': 'depth投影/undistort_projection_multithread_v2.py',
+        'class_name': 'DepthProjectorMultiThread',
+        'input': 'pcd',
+        'needs_roadside_images': False,
+        'control_subdir': 'depth',
+        'control_input_type': 'depth',
+    },
+    'hdmap': {
+        'script': 'HDMap投影/undistort_projection_multithread_v2.py',
+        'class_name': 'HDMapProjectorMultiThread',
+        'input': 'annotation',
+        'needs_roadside_images': False,
+        'control_subdir': 'overlay',
+        'control_input_type': 'hdmap_bbox',
+    },
+}
+
+
+def build_pcd_timestamp_map(pcd_dir):
+    pcd_dir = Path(pcd_dir)
+    ts_map = {}
+    for pcd_file in pcd_dir.glob("*.pcd"):
+        ts = common_utils.extract_timestamp_from_filename(str(pcd_file))
+        if ts is not None:
+            ts_map[int(ts)] = pcd_file
+    return ts_map
+
+
+def find_closest_pcd(pcd_ts_map, target_ts, tolerance_ms=500):
+    best_ts, best_diff = None, float('inf')
+    for ts in pcd_ts_map:
+        diff = abs(ts - target_ts)
+        if diff < best_diff:
+            best_diff = diff
+            best_ts = ts
+    if best_ts is not None and best_diff <= tolerance_ms:
+        return pcd_ts_map[best_ts]
+    return None
 
 TRANSFER_CAM_NAME = 'ftheta_camera_front_wide_120fov'
 FW_CAM_NAME = 'FW'
@@ -199,8 +246,7 @@ def build_transforms(label_files, timestamps, vehicle_id):
 
 def load_projector(proj_type, scene_paths, calib_dir, transforms):
     """动态加载投影器，用修改后的 calib_dir"""
-    from segment_pipeline.projection_runner import PROJECTION_TYPES
-    config = PROJECTION_TYPES[proj_type]
+    config = PROJECTION_CONFIGS[proj_type]
 
     import importlib.util
     script_path = PROJECT_ROOT / config['script']
@@ -229,16 +275,12 @@ def load_projector(proj_type, scene_paths, calib_dir, transforms):
 
 def run_projections(timestamps, label_files, scene_paths, calib_dir, transforms,
                     vehicle_id, output_dir):
-    from segment_pipeline.projection_runner import (
-        PROJECTION_TYPES, build_pcd_timestamp_map, find_closest_pcd
-    )
-
     pcd_ts_map = build_pcd_timestamp_map(scene_paths['pcd'])
     if not pcd_ts_map:
         print(f"  [WARN] PCD 目录为空: {scene_paths['pcd']}")
 
-    for proj_type in PROJECTION_TYPES:
-        config = PROJECTION_TYPES[proj_type]
+    for proj_type in PROJECTION_CONFIGS:
+        config = PROJECTION_CONFIGS[proj_type]
         print(f"\n  [{proj_type}] 投影 ...")
 
         projector = load_projector(proj_type, scene_paths, calib_dir, transforms)
