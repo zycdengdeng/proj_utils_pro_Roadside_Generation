@@ -334,7 +334,7 @@ CONTROL_INPUT_NAMES = {
 def generate_videos(output_dir, fps=10, resolution=(1280, 720)):
     print(f"\n  生成视频 (FW, {resolution[0]}x{resolution[1]}, {fps}fps) ...")
 
-    for proj_type in PROJECTION_TYPES:
+    for proj_type in PROJECTION_CONFIGS:
         ctrl_subdir = CONTROL_SUBDIRS[proj_type]
         ctrl_name = CONTROL_INPUT_NAMES[proj_type]
 
