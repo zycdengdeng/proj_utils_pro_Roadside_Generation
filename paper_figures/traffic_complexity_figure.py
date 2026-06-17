@@ -154,12 +154,57 @@ def _in_region(x, y, region):
             region["y_min"] <= y <= region["y_max"])
 
 
+def reference_region(dataset_root):
+    """复用 intersection_filter.py 的 REFERENCE_VEHICLES 逻辑算出"官方"路口矩形。
+
+    取 4 个方向参考车进/出路口共 8 个 (x,y) 点的 min/max（与原版完全一致），
+    用给定的 dataset_root 解析场景，绕开 common_utils 里写死的 DATASET_ROOT。
+    """
+    import importlib.util
+    import common_utils
+    common_utils.DATASET_ROOT = dataset_root  # find_scene_path 用它定位场景
+
+    ifp = REPO_ROOT / "intersection_filter" / "intersection_filter.py"
+    spec = importlib.util.spec_from_file_location("_ifilt", str(ifp))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.DATASET_ROOT = dataset_root
+
+    xs, ys, used = [], [], 0
+    for ref in mod.REFERENCE_VEHICLES:
+        files = mod.get_label_files(ref["scene_prefix"])
+        if not files:
+            continue
+        for ts in (ref["entry_ts"], ref["exit_ts"]):
+            f, _ = mod.find_closest_label(files, ts)
+            if not f:
+                continue
+            pos = mod.find_vehicle_in_label(mod.load_label_file(f), ref["vehicle_id"])
+            if pos:
+                xs.append(pos[0]); ys.append(pos[1]); used += 1
+    if used < 4:
+        print(f"[WARN] reference-region 仅取到 {used} 个参考点，无法复算官方路口框")
+        return None
+    region = {"x_min": min(xs), "x_max": max(xs),
+              "y_min": min(ys), "y_max": max(ys)}
+    print(f"[INFO] reference-region 由 {used} 个参考车进出点算出（与 intersection_filter 一致）")
+    return region
+
+
 def resolve_region(args, tracks):
-    """确定路口矩形区域。优先级：--region > --region-json > intersection_filter > 自动估计。"""
+    """确定路口矩形区域。
+
+    优先级：--region > --reference-region > --region-json/intersection_filter > 自动估计。
+    """
     if args.region:
         x0, x1, y0, y1 = args.region
         return ({"x_min": min(x0, x1), "x_max": max(x0, x1),
                  "y_min": min(y0, y1), "y_max": max(y0, y1)}, "manual")
+    if args.reference_region:
+        reg = reference_region(args.dataset_root)
+        if reg:
+            return reg, "reference-vehicles"
+        print("[WARN] 退回到下一优先级的区域来源")
     rf = Path(args.region_json) if args.region_json else \
         (INTERSECTION_FILTER_DIR / "intersection_region.json")
     if rf.exists():
@@ -636,6 +681,9 @@ def main():
     ap.add_argument("--ts-end", type=int, default=None, help="时间窗止（毫秒，可选）")
     ap.add_argument("--region", type=float, nargs=4, default=None,
                     metavar=("XMIN", "XMAX", "YMIN", "YMAX"), help="手动指定路口矩形")
+    ap.add_argument("--reference-region", action="store_true",
+                    help="复用 intersection_filter 的 REFERENCE_VEHICLES 复算官方路口框"
+                         "（需要 --dataset-root 指向含参考场景的数据根）")
     ap.add_argument("--region-json", type=str, default=None,
                     help="路口区域 json（默认读 intersection_filter/output/intersection_region.json）")
     ap.add_argument("--region-half", type=float, default=50.0,
