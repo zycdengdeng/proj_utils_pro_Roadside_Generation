@@ -619,23 +619,25 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ("Conflict points", f"{metrics['n_crossings']}"),
         ("Median speed", f"{metrics['mean_speed']:.1f} m/s"),
     ]
-    y_top, y_bot = 0.90, 0.30
+    # 指标表（带边框；底部单独一行放复杂度评级，红字，无数字）
+    box_top, box_bot, sep_y = 0.965, 0.045, 0.165
+    ax_card.add_patch(Rectangle((0.0, box_bot), 1.0, box_top - box_bot, fill=False,
+                                edgecolor="black", lw=1.3, zorder=2))
+    ax_card.plot([0.0, 1.0], [sep_y, sep_y], color="black", lw=1.0, zorder=2)
+
+    y_top, y_bot = 0.90, 0.24
     step = (y_top - y_bot) / (len(rows) - 1)
     y = y_top
     for k, v in rows:
-        ax_card.text(0.04, y, k, fontsize=11.5, va="center")
-        ax_card.text(0.96, y, v, fontsize=11.5, va="center", ha="right", fontweight="bold")
+        ax_card.text(0.03, y, k, fontsize=11.5, va="center")
+        ax_card.text(0.97, y, v, fontsize=11.5, va="center", ha="right", fontweight="bold")
         y -= step
 
-    # 复杂度评级（红色醒目徽章，无数字）
-    ax_card.text(0.04, 0.205, "Complexity level", fontsize=12.5, va="center",
+    cell_y = (sep_y + box_bot) / 2
+    ax_card.text(0.03, cell_y, "Complexity level", fontsize=12.5, va="center",
                  fontweight="bold")
-    ax_card.add_patch(FancyBboxPatch((0.16, 0.03), 0.68, 0.115,
-                                     boxstyle="round,pad=0.006,rounding_size=0.03",
-                                     linewidth=0, facecolor=lvl_color,
-                                     mutation_aspect=0.5, zorder=3))
-    ax_card.text(0.50, 0.088, metrics["level"].upper(), fontsize=21, va="center",
-                 ha="center", color="white", fontweight="bold", zorder=4)
+    ax_card.text(0.97, cell_y, metrics["level"].upper(), fontsize=15, va="center",
+                 ha="right", color=lvl_color, fontweight="bold")
 
     # 时序密度：瞬时在场数（左轴）+ 累计通过数（右轴）
     ax_time.set_title("(c) Temporal density", fontsize=13, loc="left",
