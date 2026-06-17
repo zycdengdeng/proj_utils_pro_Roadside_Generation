@@ -75,6 +75,9 @@ REGION_LABEL = "Generation region"
 # 图标题
 FIGURE_TITLE = "Traffic flow complexity of THICV-R2V"
 
+# 是否分别输出 (a)(b)(c) 三张独立图（由 --separate 设置）
+SEPARATE_PANELS = False
+
 
 # ==================================================================
 # 数据读取
@@ -525,26 +528,9 @@ def _setup_serif_font(plt):
     return serif[0]
 
 
-def draw_figure(scene_name, region, region_src, metrics, tag,
-                base_pts=None, demo=False):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib import gridspec
-    from matplotlib.patches import Rectangle, FancyArrow, FancyBboxPatch
-
-    _setup_serif_font(plt)
-
-    fig = plt.figure(figsize=(13.5, 7.9))
-    gs = gridspec.GridSpec(2, 2, width_ratios=[1.9, 1.0],
-                           height_ratios=[1.62, 1.0], wspace=0.06, hspace=0.4)
-    ax = fig.add_subplot(gs[:, 0])
-    ax_card = fig.add_subplot(gs[0, 1])
-    ax_time = fig.add_subplot(gs[1, 1])
-
+def _panel_bev(ax, region, metrics, base_pts=None, demo=False):
+    from matplotlib.patches import Rectangle, FancyArrow
     passing = metrics["passing"]
-
-    # 底图
     if base_pts is not None and len(base_pts) > 0:
         ax.scatter(base_pts[:, 0], base_pts[:, 1], s=0.15, c="#c8c8c8",
                    alpha=0.5, rasterized=True, zorder=0)
@@ -559,9 +545,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                                rw, region["y_max"] - region["y_min"],
                                color="#ededed", zorder=0))
 
-    # 注：分析区域仅用于统计/取景，最终图不再绘制区域框
-
-    # 轨迹（按航向着色）
+    # 分析区域仅用于统计/取景，最终图不再绘制区域框
     many = len(passing) > 45
     for vid, fr in passing.items():
         xs = [r["x"] for r in fr]
@@ -576,7 +560,6 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                                     width=0.4, head_width=2.0, head_length=2.2,
                                     length_includes_head=True, color=col, zorder=6))
 
-    # 冲突点
     for (px, py) in metrics["crossings"]:
         ax.scatter(px, py, marker="x", s=55, c="#111111", linewidths=1.6, zorder=7)
     if metrics["crossings"]:
@@ -596,7 +579,9 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     ax.grid(True, alpha=0.22, lw=0.5)
     ax.legend(loc="upper right", fontsize=10, framealpha=0.92)
 
-    # 指标面板
+
+def _panel_metrics(ax_card, metrics):
+    from matplotlib.patches import Rectangle
     ax_card.axis("off")
     ax_card.set_xlim(0, 1)
     ax_card.set_ylim(0, 1)
@@ -613,12 +598,10 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ("Conflict points", f"{metrics['n_crossings']}"),
         ("Median speed (m/s)", f"{metrics['mean_speed']:.1f}"),
     ]
-    # 指标表（带边框；底部单独一行放复杂度评级，红字，无数字）
     box_top, box_bot, sep_y = 0.965, 0.045, 0.165
     ax_card.add_patch(Rectangle((0.0, box_bot), 1.0, box_top - box_bot, fill=False,
                                 edgecolor="black", lw=1.3, zorder=2))
     ax_card.plot([0.0, 1.0], [sep_y, sep_y], color="black", lw=1.0, zorder=2)
-
     y_top, y_bot = 0.90, 0.24
     step = (y_top - y_bot) / (len(rows) - 1)
     y = y_top
@@ -626,14 +609,14 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ax_card.text(0.03, y, k, fontsize=11.5, va="center")
         ax_card.text(0.97, y, v, fontsize=11.5, va="center", ha="right", fontweight="bold")
         y -= step
-
     cell_y = (sep_y + box_bot) / 2
     ax_card.text(0.03, cell_y, "Scene complexity", fontsize=12.5, va="center",
                  fontweight="bold")
     ax_card.text(0.97, cell_y, metrics["level"].upper(), fontsize=15, va="center",
                  ha="right", color=lvl_color, fontweight="bold")
 
-    # 时序密度：瞬时在场数（左轴）+ 累计通过数（右轴）
+
+def _panel_temporal(ax_time, metrics):
     ax_time.set_title("(c) Temporal density", fontsize=13, loc="left",
                       fontweight="bold")
     t0 = metrics["frame_ts"][0]
@@ -652,6 +635,66 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     l1, lb1 = ax_time.get_legend_handles_labels()
     l2, lb2 = ax2.get_legend_handles_labels()
     ax_time.legend(l1 + l2, lb1 + lb2, fontsize=9, loc="upper left", framealpha=0.9)
+
+
+def draw_separate(scene_name, region, region_src, metrics, tag,
+                  base_pts=None, demo=False):
+    """分别输出 (a)(b)(c) 三张独立图，尺寸沿用合并版各子图的占比，便于自行拼装。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _setup_serif_font(plt)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 各子图物理尺寸（英寸），对应合并版 13.5x7.9、宽 1.9:1.0、右列高 1.62:1.0
+    specs = [
+        ("a_bev", (8.8, 7.1), _panel_bev,
+         lambda ax: _panel_bev(ax, region, metrics, base_pts, demo)),
+        ("b_metrics", (4.7, 4.9), _panel_metrics,
+         lambda ax: _panel_metrics(ax, metrics)),
+        ("c_temporal", (4.7, 3.0), _panel_temporal,
+         lambda ax: _panel_temporal(ax, metrics)),
+    ]
+    outs = []
+    for name, figsize, _fn, call in specs:
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111)
+        call(ax)
+        fig.tight_layout()
+        png = OUTPUT_DIR / f"traffic_complexity_{tag}_{name}.png"
+        pdf = OUTPUT_DIR / f"traffic_complexity_{tag}_{name}.pdf"
+        fig.savefig(str(png), dpi=300, bbox_inches="tight")
+        fig.savefig(str(pdf), bbox_inches="tight")
+        plt.close(fig)
+        outs.append(str(png))
+    print("[OK] 三张独立子图已保存:")
+    for p in outs:
+        print(f"  {p}")
+    return outs[0], outs[0].replace(".png", ".pdf")
+
+
+def draw_figure(scene_name, region, region_src, metrics, tag,
+                base_pts=None, demo=False):
+    if SEPARATE_PANELS:
+        return draw_separate(scene_name, region, region_src, metrics, tag,
+                             base_pts=base_pts, demo=demo)
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import gridspec
+
+    _setup_serif_font(plt)
+
+    fig = plt.figure(figsize=(13.5, 7.9))
+    gs = gridspec.GridSpec(2, 2, width_ratios=[1.9, 1.0],
+                           height_ratios=[1.62, 1.0], wspace=0.06, hspace=0.4)
+    ax = fig.add_subplot(gs[:, 0])
+    ax_card = fig.add_subplot(gs[0, 1])
+    ax_time = fig.add_subplot(gs[1, 1])
+
+    _panel_bev(ax, region, metrics, base_pts=base_pts, demo=demo)
+    _panel_metrics(ax_card, metrics)
+    _panel_temporal(ax_time, metrics)
 
     fig.suptitle(FIGURE_TITLE, fontsize=16, fontweight="bold", y=0.99)
 
@@ -917,6 +960,8 @@ def main():
     ap.add_argument("--region-half", type=float, default=50.0,
                     help="自动估计路口区域时的半边长（米，默认50）")
     ap.add_argument("--no-pcd", action="store_true", help="不加载点云底图")
+    ap.add_argument("--separate", action="store_true",
+                    help="分别输出 (a)(b)(c) 三张独立图（不合并），便于自行拼装")
     # 批量扫描 / 排名
     ap.add_argument("--scan", action="store_true",
                     help="扫描 --dataset-root 下所有 clip，并行算复杂度并排名")
@@ -934,6 +979,9 @@ def main():
                     help="叠加多个不同朝向的 clip（名/前缀/路径），如 "
                          "--overlay-clips 010 051；轨迹时间重基对齐后合并到同一路口")
     args = ap.parse_args()
+
+    global SEPARATE_PANELS
+    SEPARATE_PANELS = args.separate
 
     if args.scan:
         run_scan(args)
