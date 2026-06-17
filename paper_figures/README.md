@@ -135,12 +135,12 @@ python traffic_complexity_figure.py --overlay-clips 010 051 \
 数据来源（`<clip>/`）：`road/lidar/merged_pcd/`、`road_labels/interpolation_labels/`、
 `car/pcds/main/`，自车 id 来自 `support_info/carid.json`。
 
-坐标变换（与 `segment_pipeline/ego_transform.py` 一致）：自车在路侧标注里有 3D 框
-`(x,y,z,roll,pitch,yaw)`，车端 LiDAR 点 → 路侧：
-
-```
-p_road = euler2rotmat(roll,pitch,yaw) @ (p_carlidar + [0,0,h/2+0.25]) + [x,y,z]
-```
+坐标变换：**优先用标定的 world2lidar 逆变换**
+（`support_info/transform_json/<NNN>/world2lidar_transforms.json`，逐帧位姿，按车端时间戳匹配）：
+`world2lidar: p_lidar = R·p_world + t`，取逆得 `p_world = Rᵀ·(p_lidar − t)` 把车端点变到路侧。
+日志会打印校验：标定自车原点 vs 路侧标注框中心，二者应几乎重合。
+找不到 transform_json 或加 `--use-box-transform` 时，退回自车框近似
+（`segment_pipeline/ego_transform.py` 约定，含 `h/2+0.25` 经验偏移，精度较差）。
 
 帧选取：默认（`--anchor best`）**遍历该 clip 所有含自车 id 的路侧帧，选车端/路侧时间差最小的配对**，
 把时间 gap 压到最小；`--anchor visualize` 则锚定 `carid.json` 的 `visualize_roadtime`。

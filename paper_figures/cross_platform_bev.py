@@ -82,6 +82,41 @@ def car_lidar_to_road(points, ego, lidar_z_extra=LIDAR_Z_EXTRA, yaw_offset_deg=0
     return (R @ (points + offset).T).T + t
 
 
+def load_world2lidar_json(transform_dir, clip_name):
+    """读取 support_info/transform_json/<NNN>/world2lidar_transforms.json。
+
+    返回 [(ts_seconds, rotvec(3,), translation(3,))]（按时间排序），找不到返回 None。
+    """
+    num = clip_name.split("_")[0]
+    p = os.path.join(transform_dir, num, "world2lidar_transforms.json")
+    if not os.path.exists(p):
+        return None
+    out = []
+    for e in json.load(open(p)):
+        w = e.get("world2lidar", {})
+        if "rotation" in w and "translation" in w:
+            out.append((float(e["timestamp"]),
+                        np.array(w["rotation"], float),
+                        np.array(w["translation"], float)))
+    out.sort(key=lambda kv: kv[0])
+    return out or None
+
+
+def car_lidar_to_road_json(points, w2l_list, car_ts_s):
+    """用标定的 world2lidar（取逆）把车端 LiDAR 点 → 路侧(world)坐标系。
+
+    world2lidar: p_lidar = R_w2l @ p_world + t_w2l  →  逆: p_world = R_w2l^T @ (p_lidar - t_w2l)
+    返回 (p_world, ego_origin_world, ts_diff_s)。
+    """
+    from scipy.spatial.transform import Rotation
+    ts, rotvec, t_w2l = min(w2l_list, key=lambda kv: abs(kv[0] - car_ts_s))
+    R_w2l = Rotation.from_rotvec(rotvec).as_matrix()
+    R_l2w = R_w2l.T
+    t_l2w = -R_l2w @ t_w2l            # 车端 LiDAR 原点在 world 中的位置
+    p_world = (R_l2w @ points.T).T + t_l2w if len(points) else points
+    return p_world, t_l2w, abs(ts - car_ts_s)
+
+
 def box_corners_bev(obj):
     """3D 框俯视投影的 4 角点 (顺时针)。"""
     l, w = obj.get("length", 4.0), obj.get("width", 1.8)
@@ -400,8 +435,20 @@ def build_frame(args):
 
     road_pts = load_pcd(frame["road_pcd"], args.max_points)
     car_pts_raw = load_pcd(frame["car_pcd"], args.max_points)
-    car_pts = car_lidar_to_road(car_pts_raw, ego, args.lidar_z_extra,
-                                args.car_yaw_offset)
+
+    # 优先用标定的 world2lidar（逆变换）；否则退回自车框近似
+    transform_dir = args.transform_dir or os.path.join(
+        args.dataset_root, "support_info", "transform_json")
+    w2l = None if args.use_box_transform else load_world2lidar_json(transform_dir, clip_name)
+    if w2l:
+        car_pts, ego_origin, dts = car_lidar_to_road_json(car_pts_raw, w2l, car_ts / 1000.0)
+        print(f"[INFO] 变换: 标定 world2lidar 逆 (匹配Δ={dts*1000:.0f} ms)")
+        print(f"[INFO] 校验: 标定自车原点=({ego_origin[0]:.1f},{ego_origin[1]:.1f}) "
+              f"vs 标注框中心=({ego['x']:.1f},{ego['y']:.1f})")
+    else:
+        car_pts = car_lidar_to_road(car_pts_raw, ego, args.lidar_z_extra,
+                                    args.car_yaw_offset)
+        print("[INFO] 变换: 自车框近似（未找到 transform_json 或 --use-box-transform）")
     print(f"[INFO] 路侧点 {len(road_pts)} | 车端点 {len(car_pts)} | 标注 {len(labels)} 个")
 
     return clip_name, road_pts, car_pts, labels, ego
@@ -535,8 +582,12 @@ def main():
                          "选帧时挑 gap 最接近此值的(如 5 表示车比路晚约5ms)")
     ap.add_argument("--xlim", type=float, nargs=2, default=list(DEFAULT_XLIM))
     ap.add_argument("--ylim", type=float, nargs=2, default=list(DEFAULT_YLIM))
+    ap.add_argument("--transform-dir", type=str, default=None,
+                    help="标定变换目录（默认 <dataset-root>/support_info/transform_json）")
+    ap.add_argument("--use-box-transform", action="store_true",
+                    help="强制用自车框近似变换（默认优先用标定 world2lidar 逆变换）")
     ap.add_argument("--lidar-z-extra", type=float, default=LIDAR_Z_EXTRA,
-                    help="车端 LiDAR 相对 bbox 顶部的额外高度偏移（默认0.25）")
+                    help="（仅框近似）车端 LiDAR 相对 bbox 顶部的额外高度偏移（默认0.25）")
     ap.add_argument("--car-yaw-offset", type=float, default=0.0,
                     help="车端 LiDAR 安装朝向修正(度)；若车端点云整体转了角度用它纠正")
     ap.add_argument("--max-points", type=int, default=400000)
