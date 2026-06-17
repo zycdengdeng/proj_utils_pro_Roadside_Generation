@@ -159,8 +159,13 @@ python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJi
 # 默认范围 x[-130,20] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
 ```
 
-`--scan-all`：并行遍历 dataset-root 下所有 clip，打印各 clip 最小车端/路侧时间差的排名，
-选全局最小的渲染（`--workers` 控制并行数）。
+`--scan-all`：并行遍历 clip，**优先在复杂度高的 clip 中、且自车 x 在范围内、挑时间差最小**的渲染：
+- `--complexity-csv`：复杂度排名 CSV（`traffic_complexity_figure.py --scan` 产出），默认读 `output/complexity_ranking.csv`；
+- `--top-complex N`：只在复杂度前 N 的 clip 中搜（默认 10，`<=0` 不限）；
+- `--ego-x-min/--ego-x-max`：所选帧自车中心 x 的范围（默认 -100 ~ -20）；
+- `--workers`：并行数。
+
+会打印候选 clip 的 `score / gap(ms) / ego_x` 表，并选 gap 最小者。
 
 常用开关：`--anchor best|visualize` 选帧策略；`--road-time <ms>` 手动指定路侧帧；
 `--xlim/--ylim` 改范围；`--car-yaw-offset <deg>` 纠正车端 LiDAR 安装朝向（若车端点云整体转了角度）；
