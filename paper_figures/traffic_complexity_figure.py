@@ -664,6 +664,164 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
 
 
 # ==================================================================
+# 批量扫描 + 排名（找出最复杂的 clip）
+# ==================================================================
+def analyze_clip(clip_dir, fixed_region, region_half, ts_start, ts_end,
+                 labels_subdir, region_json):
+    """计算单个 clip 的复杂度摘要（供多进程并行调用，不绘图）。"""
+    name = os.path.basename(os.path.normpath(clip_dir))
+    try:
+        label_dir = find_label_dir(clip_dir, labels_subdir)
+        tracks, frame_ts = read_all_labels(label_dir, ts_start, ts_end)
+        if not tracks:
+            return {"clip": name, "ok": False, "error": "no vehicle tracks"}
+
+        if fixed_region is not None:
+            region = fixed_region
+        elif region_json and Path(region_json).exists():
+            with open(region_json, "r") as f:
+                region = json.load(f).get("region")
+        else:
+            xs, ys = [], []
+            for fr in tracks.values():
+                xs += [r["x"] for r in fr]; ys += [r["y"] for r in fr]
+            cx, cy = float(np.median(xs)), float(np.median(ys))
+            region = {"x_min": cx - region_half, "x_max": cx + region_half,
+                      "y_min": cy - region_half, "y_max": cy + region_half}
+
+        m = compute_metrics(tracks, frame_ts, region)
+        return {
+            "clip": name, "ok": True,
+            "score": round(m["score"], 2), "level": m["level"],
+            "n_pass": m["n_pass"], "throughput": round(m["throughput"], 2),
+            "peak_concurrent": m["peak_concurrent"],
+            "mean_concurrent": round(m["mean_concurrent"], 2),
+            "dir_entropy": round(m["dir_entropy"], 3),
+            "turn_ratio": round(m["turn_ratio"], 3),
+            "n_crossings": m["n_crossings"],
+            "duration": round(m["duration"], 1),
+            "n_total_vehicles": len(tracks),
+        }
+    except Exception as e:  # noqa: BLE001 - 单个 clip 失败不应中断整体
+        return {"clip": name, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def discover_clips(root, pattern, labels_subdir=None):
+    """在数据根下发现 clip 目录（含路侧标注目录的子目录）。"""
+    sub = labels_subdir or os.path.join("road_labels", "interpolation_labels")
+    out = []
+    for p in sorted(glob.glob(os.path.join(root, pattern))):
+        if not os.path.isdir(p):
+            continue
+        if (Path(p) / sub).is_dir() or list(Path(p).rglob("interpolation_labels"))[:1]:
+            out.append(os.path.abspath(p))
+    return out
+
+
+def run_scan(args):
+    import concurrent.futures as cf
+    import csv
+
+    clip_dirs = discover_clips(args.dataset_root, args.pattern, args.labels_subdir)
+    if not clip_dirs:
+        print(f"[ERROR] 在 {args.dataset_root} 下用 pattern '{args.pattern}' 没发现 clip")
+        sys.exit(1)
+    print(f"[INFO] 发现 {len(clip_dirs)} 个 clip")
+
+    # 统一路口区域（保证跨 clip 可比）：--region > --reference-region > 各自自动估计
+    fixed_region, region_src = None, "per-clip auto(median)"
+    if args.region:
+        x0, x1, y0, y1 = args.region
+        fixed_region = {"x_min": min(x0, x1), "x_max": max(x0, x1),
+                        "y_min": min(y0, y1), "y_max": max(y0, y1)}
+        region_src = "manual"
+    elif args.reference_region:
+        fixed_region = reference_region(args.dataset_root)
+        region_src = "reference-vehicles" if fixed_region else "per-clip auto(median)"
+    print(f"[INFO] 路口区域来源: {region_src}")
+    if fixed_region is None:
+        print("[WARN] 各 clip 用自身中位数估区域，跨 clip 评分可比性稍弱；"
+              "若是同一路口建议加 --reference-region 或 --region 以统一区域")
+
+    workers = args.workers or min(64, os.cpu_count() or 8)
+    print(f"[INFO] 并行 workers = {workers}\n")
+
+    results = []
+    with cf.ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(analyze_clip, cd, fixed_region, args.region_half,
+                          args.ts_start, args.ts_end, args.labels_subdir,
+                          args.region_json): cd for cd in clip_dirs}
+        for i, fut in enumerate(cf.as_completed(futs), 1):
+            r = fut.result()
+            results.append(r)
+            tag = (f"score={r['score']:5.1f} ({r['level']:<6}) "
+                   f"pass={r['n_pass']:>3} thru={r['throughput']:.1f}"
+                   if r.get("ok") else f"[FAIL] {r.get('error')}")
+            print(f"[{i:>3}/{len(clip_dirs)}] {r['clip']:<42} {tag}")
+
+    ok = sorted([r for r in results if r.get("ok")],
+                key=lambda r: r["score"], reverse=True)
+    bad = [r for r in results if not r.get("ok")]
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = OUTPUT_DIR / "complexity_ranking.csv"
+    cols = ["rank", "clip", "score", "level", "n_pass", "throughput",
+            "peak_concurrent", "mean_concurrent", "dir_entropy", "turn_ratio",
+            "n_crossings", "duration", "n_total_vehicles"]
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for rank, r in enumerate(ok, 1):
+            w.writerow({"rank": rank, **{c: r.get(c, "") for c in cols if c != "rank"}})
+
+    print(f"\n{'='*72}\n排名（按复杂度评分降序）  区域来源: {region_src}\n{'='*72}")
+    print(f"{'#':>3}  {'clip':<42}{'score':>7} {'lvl':<7}{'pass':>5}{'thru':>7}"
+          f"{'peak':>5}{'cross':>6}")
+    for rank, r in enumerate(ok[:args.top], 1):
+        print(f"{rank:>3}  {r['clip']:<42}{r['score']:>7.1f} {r['level']:<7}"
+              f"{r['n_pass']:>5}{r['throughput']:>7.1f}{r['peak_concurrent']:>5}"
+              f"{r['n_crossings']:>6}")
+    if bad:
+        print(f"\n[WARN] {len(bad)} 个 clip 失败：")
+        for r in bad[:10]:
+            print(f"    {r['clip']:<42} {r.get('error')}")
+    print(f"\n[OK] 完整排名已存: {csv_path}")
+
+    # 渲染 top-N 论文图
+    if ok and args.plot_top > 0:
+        region_pass = (fixed_region, region_src) if fixed_region else None
+        print(f"\n[INFO] 渲染 top-{min(args.plot_top, len(ok))} 复杂 clip 的论文图...")
+        for r in ok[:args.plot_top]:
+            cd = next(c for c in clip_dirs
+                      if os.path.basename(os.path.normpath(c)) == r["clip"])
+            try:
+                png, pdf, _ = render_clip(cd, args, fixed_region=region_pass)
+                print(f"  [{r['clip']}] score={r['score']:.1f} -> {png}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [{r['clip']}] 渲染失败: {e}")
+
+
+def render_clip(clip_dir, args, fixed_region=None):
+    """读取 + 计算 + 绘图，返回 (png, pdf, metrics)。fixed_region 为 (region, src) 或 None。"""
+    clip_dir = os.path.abspath(clip_dir)
+    label_dir = find_label_dir(clip_dir, args.labels_subdir)
+    tracks, frame_ts = read_all_labels(label_dir, args.ts_start, args.ts_end)
+    if not tracks:
+        raise RuntimeError("未读到任何车辆轨迹")
+    if fixed_region is not None:
+        region, region_src = fixed_region
+    else:
+        region, region_src = resolve_region(args, tracks)
+    name = os.path.basename(clip_dir)
+    mid_ts = (frame_ts[0] + frame_ts[-1]) // 2
+    base_pts = None if args.no_pcd else get_base_pcd(clip_dir, mid_ts)
+    metrics = compute_metrics(tracks, frame_ts, region)
+    png, pdf = draw_figure(name, region, region_src, metrics, name,
+                           base_pts=base_pts, demo=False)
+    return png, pdf, metrics
+
+
+# ==================================================================
 # 主流程
 # ==================================================================
 def main():
@@ -689,7 +847,22 @@ def main():
     ap.add_argument("--region-half", type=float, default=50.0,
                     help="自动估计路口区域时的半边长（米，默认50）")
     ap.add_argument("--no-pcd", action="store_true", help="不加载点云底图")
+    # 批量扫描 / 排名
+    ap.add_argument("--scan", action="store_true",
+                    help="扫描 --dataset-root 下所有 clip，并行算复杂度并排名")
+    ap.add_argument("--pattern", type=str, default="*",
+                    help="--scan 时的 clip 目录通配（默认 '*'，可如 '0??_*'）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="--scan 并行进程数（默认 min(64, CPU核数)）")
+    ap.add_argument("--top", type=int, default=15,
+                    help="--scan 终端打印的排名条数（默认15，CSV 始终全量）")
+    ap.add_argument("--plot-top", type=int, default=1,
+                    help="--scan 后渲染前 N 个最复杂 clip 的论文图（默认1，0=不渲染）")
     args = ap.parse_args()
+
+    if args.scan:
+        run_scan(args)
+        return
 
     if args.demo:
         scene_name, tracks, frame_ts, region = make_demo()

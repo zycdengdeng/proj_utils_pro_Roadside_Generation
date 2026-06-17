@@ -60,6 +60,31 @@ python traffic_complexity_figure.py --dataset-root /mnt/car_road_data_TianJin --
 python traffic_complexity_figure.py --demo
 ```
 
+## 批量扫描：找出最复杂的 clip（论文展示用）
+
+并行算完数据集里所有 clip 的复杂度，排名，并自动渲染最复杂那个的论文图：
+
+```bash
+python traffic_complexity_figure.py --scan \
+  --dataset-root /mnt/car_road_data_TianJin \
+  --reference-region \        # 同一路口建议统一区域，保证跨 clip 可比
+  --workers 64 \
+  --plot-top 1                # 自动渲染 top-1 最复杂 clip
+```
+
+- **并行**：CPU 多进程（`ProcessPoolExecutor`），`--workers` 默认 `min(64, CPU核数)`。
+  此任务是几何/统计计算，CPU 多进程即最优，无需 GPU。
+- **区域统一**：若 89 个 clip 是同一路口，强烈建议加 `--reference-region`（或 `--region`），
+  让所有 clip 用同一路口框，评分才可比；否则各 clip 用自身中位数估区域，可比性稍弱。
+- **输出**：
+  - 终端打印排名表（按评分降序）；
+  - `paper_figures/output/complexity_ranking.csv`（**全量**排名，含各项指标，可自己再排序/作图）；
+  - `--plot-top N`：渲染前 N 个最复杂 clip 的论文图（默认 1，`0` 则只排名不画）。
+- `--pattern`：限定扫描范围，如 `--pattern '0??_*'`。`--top`：终端显示条数（默认 15）。
+
+典型流程：先 `--scan` 拿到排名 → 看 CSV/终端选定要展示的 clip → 若想换一个，单独对它跑
+`--clip-dir <那个clip> --reference-region --dataset-root ...` 出最终图。
+
 常用开关：
 
 | 参数 | 说明 |
