@@ -444,6 +444,7 @@ def compute_metrics(tracks, frame_ts, region):
 
     return {
         "passing": passing, "region_poly": region_poly,
+        "n_total": len(tracks),  # 输入里去重后的全部车辆数（仅车辆类）
         "n_pass": n_pass, "duration": duration, "throughput": throughput,
         "peak_concurrent": peak, "mean_concurrent": mean_conc,
         "dir_entropy": dir_entropy, "turn_ratio": turn_ratio, "n_turners": turners,
@@ -604,7 +605,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     lvl_color = {"High": "#d62728", "Medium": "#ff7f0e", "Low": "#2ca02c"}[metrics["level"]]
     rows = [
         ("Duration (s)", f"{metrics['duration']:.0f}"),
-        ("Vehicles annotated", f"{len(metrics['frame_ts'])}"),
+        ("Vehicles annotated", f"{metrics['n_total']}"),
         ("Flow rate (veh/min)", f"{metrics['throughput']:.1f}"),
         ("Max. vehicles in scene", f"{metrics['peak_concurrent']}"),
         ("Average vehicles in scene", f"{metrics['mean_concurrent']:.1f}"),
