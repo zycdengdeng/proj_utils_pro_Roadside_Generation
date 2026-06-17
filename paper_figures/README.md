@@ -142,16 +142,21 @@ python traffic_complexity_figure.py --overlay-clips 010 051 \
 p_road = euler2rotmat(roll,pitch,yaw) @ (p_carlidar + [0,0,h/2+0.25]) + [x,y,z]
 ```
 
-帧选取：默认用 `carid.json` 的 `visualize_roadtime` 作路侧帧，再在 `car/pcds/main` 找最近时间戳。
+帧选取：默认（`--anchor best`）**遍历该 clip 所有含自车 id 的路侧帧，选车端/路侧时间差最小的配对**，
+把时间 gap 压到最小；`--anchor visualize` 则锚定 `carid.json` 的 `visualize_roadtime`。
+（路侧 ~7-8Hz、车端 10Hz，best 通常能把 gap 压到 0-40ms 内。）
+
+配色：路侧点=蓝，车端点=红，3D 标注框=黑，自车框=绿。
 
 用法：
 
 ```bash
 python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJin
-# 默认范围 x[-110,25] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
+# 默认范围 x[-140,0] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
 ```
 
-常用开关：`--road-time <ms>` 指定路侧帧；`--xlim/--ylim` 改范围；`--car-yaw-offset <deg>`
-纠正车端 LiDAR 安装朝向（若车端点云整体转了角度）；`--lidar-z-extra` 调高度偏移；`--max-points` 抽稀。
+常用开关：`--anchor best|visualize` 选帧策略；`--road-time <ms>` 手动指定路侧帧；
+`--xlim/--ylim` 改范围；`--car-yaw-offset <deg>` 纠正车端 LiDAR 安装朝向（若车端点云整体转了角度）；
+`--lidar-z-extra` 调高度偏移；`--max-points` 抽稀。
 
 输出：`paper_figures/output/cross_platform_bev_<clip>.png` / `.pdf`。

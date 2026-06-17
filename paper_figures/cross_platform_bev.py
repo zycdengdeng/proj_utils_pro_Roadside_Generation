@@ -41,8 +41,8 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_ROOT = "/mnt/car_road_data_TianJin"
 DEFAULT_CARID = "/mnt/car_road_data_TianJin/support_info/carid.json"
 
-# 展示范围（与复杂度图一致）
-DEFAULT_XLIM = (-110.0, 25.0)
+# 展示范围
+DEFAULT_XLIM = (-140.0, 0.0)
 DEFAULT_YLIM = (-50.0, 25.0)
 LIDAR_Z_EXTRA = 0.25  # 虚拟 LiDAR 在 bbox 顶部之上的偏移（ego_transform 约定）
 
@@ -171,6 +171,53 @@ def nearest(ts_list, target_ms):
     return min(ts_list, key=lambda kv: abs(kv[0] - target_ms)) if ts_list else None
 
 
+def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id):
+    """若该路侧帧有 pcd+label 且含自车 id，返回配对信息，否则 None。"""
+    road_pcd = os.path.join(road_pcd_dir, f"{road_ts}.pcd")
+    lab = os.path.join(road_lab_dir, f"{road_ts}.json")
+    if not (os.path.exists(road_pcd) and os.path.exists(lab)):
+        return None
+    objs = json.load(open(lab)).get("object", [])
+    ego = next((o for o in objs if o.get("id") == ego_id), None)
+    if ego is None:
+        return None
+    car_ts, car_pcd = nearest(car_list, road_ts)
+    return {"road_ts": road_ts, "road_pcd": road_pcd, "labels": objs, "ego": ego,
+            "car_ts": car_ts, "car_pcd": car_pcd, "gap": abs(car_ts - road_ts)}
+
+
+def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
+                 visualize_ts):
+    """选路侧/车端配对帧。
+
+    --road-time: 用指定帧；--anchor visualize: 锚定 visualize_roadtime；
+    默认 (best): 遍历所有含自车 id 的路侧帧，选时间差最小的配对。
+    """
+    if args.road_time:
+        f = _try_road_ts(int(args.road_time), road_pcd_dir, road_lab_dir,
+                         car_list, ego_id)
+        if f:
+            return f
+        print("[WARN] 指定的 --road-time 无效（缺 pcd/label 或无自车），改用最优搜索")
+
+    if args.anchor == "visualize" and visualize_ts:
+        # 按到 visualize_roadtime 的距离从近到远，取第一个有效帧
+        for road_ts, _ in sorted(road_list, key=lambda kv: abs(kv[0] - visualize_ts)):
+            f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id)
+            if f:
+                return f
+
+    # best：最小时间差
+    best = None
+    for road_ts, _ in road_list:
+        f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id)
+        if f and (best is None or f["gap"] < best["gap"]):
+            best = f
+            if best["gap"] == 0:
+                break
+    return best
+
+
 # ==================================================================
 # 主流程
 # ==================================================================
@@ -197,29 +244,18 @@ def build_frame(args):
     if not road_list or not car_list:
         raise SystemExit("路侧或车端点云为空")
 
-    # 路侧帧：优先 visualize_roadtime，要求对应 pcd+label 存在
-    road_ts = int(args.road_time) if args.road_time else int(entry.get("visualize_roadtime", 0))
-    road_pcd = os.path.join(road_pcd_dir, f"{road_ts}.pcd")
-    road_lab = os.path.join(road_lab_dir, f"{road_ts}.json")
-    if not (os.path.exists(road_pcd) and os.path.exists(road_lab)):
-        # 退回到离 visualize_roadtime 最近、且 label 存在的路侧帧
-        cand = nearest(road_list, road_ts)
-        road_ts, road_pcd = cand[0], cand[1]
-        road_lab = os.path.join(road_lab_dir, f"{road_ts}.json")
-    print(f"[INFO] 路侧帧 ts = {road_ts}")
+    visualize_ts = int(entry.get("visualize_roadtime", 0) or 0)
+    frame = choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list,
+                         ego_id, visualize_ts)
+    if frame is None:
+        raise SystemExit(f"找不到含自车 id={ego_id} 且有点云的路侧帧")
+    road_ts, car_ts = frame["road_ts"], frame["car_ts"]
+    labels, ego = frame["labels"], frame["ego"]
+    print(f"[INFO] 路侧帧 ts = {road_ts} | 车端帧 ts = {car_ts} "
+          f"(Δ={frame['gap']} ms, anchor={args.anchor})")
 
-    # 车端帧：时间戳最近
-    car_ts, car_pcd = nearest(car_list, road_ts)
-    print(f"[INFO] 车端帧 ts = {car_ts} (Δ={abs(car_ts-road_ts)} ms)")
-
-    with open(road_lab, "r") as f:
-        labels = json.load(f).get("object", [])
-    ego = next((o for o in labels if o.get("id") == ego_id), None)
-    if ego is None:
-        raise SystemExit(f"路侧帧 {road_ts} 里找不到自车 id={ego_id}")
-
-    road_pts = load_pcd(road_pcd, args.max_points)
-    car_pts_raw = load_pcd(car_pcd, args.max_points)
+    road_pts = load_pcd(frame["road_pcd"], args.max_points)
+    car_pts_raw = load_pcd(frame["car_pcd"], args.max_points)
     car_pts = car_lidar_to_road(car_pts_raw, ego, args.lidar_z_extra,
                                 args.car_yaw_offset)
     print(f"[INFO] 路侧点 {len(road_pts)} | 车端点 {len(car_pts)} | 标注 {len(labels)} 个")
@@ -257,9 +293,9 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
 
     road_pts, car_pts = _crop(road_pts), _crop(car_pts)
 
-    ax.scatter(road_pts[:, 0], road_pts[:, 1], s=0.25, c="#9a9a9a", alpha=0.55,
+    ax.scatter(road_pts[:, 0], road_pts[:, 1], s=0.25, c="#1f77b4", alpha=0.55,
                linewidths=0, rasterized=True, label="Roadside LiDAR (merged)")
-    ax.scatter(car_pts[:, 0], car_pts[:, 1], s=0.5, c="#1f77b4", alpha=0.8,
+    ax.scatter(car_pts[:, 0], car_pts[:, 1], s=0.5, c="#d62728", alpha=0.85,
                linewidths=0, rasterized=True, label="Vehicle LiDAR (ego, projected)")
 
     # 3D 标注框
@@ -267,15 +303,15 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
         if o.get("id") == ego.get("id"):
             continue
         poly = box_corners_bev(o)
-        ax.add_patch(Polygon(poly, closed=True, fill=False, edgecolor="#ff7f0e",
-                             lw=1.3, zorder=5))
-    ax.plot([], [], "-", color="#ff7f0e", lw=1.3, label="Roadside 3D annotations")
+        ax.add_patch(Polygon(poly, closed=True, fill=False, edgecolor="#111111",
+                             lw=1.2, zorder=5))
+    ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
 
-    # 自车框
+    # 自车框（绿色，避开与车端红点撞色）
     ego_poly = box_corners_bev(ego)
-    ax.add_patch(Polygon(ego_poly, closed=True, fill=False, edgecolor="#d62728",
-                         lw=2.2, zorder=6))
-    ax.plot([], [], "-", color="#d62728", lw=2.2, label="Ego vehicle")
+    ax.add_patch(Polygon(ego_poly, closed=True, fill=False, edgecolor="#00b050",
+                         lw=2.4, zorder=6))
+    ax.plot([], [], "-", color="#00b050", lw=2.4, label="Ego vehicle")
 
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
@@ -306,6 +342,8 @@ def main():
     ap.add_argument("--clip", type=str, default=None, help="clip 名/前缀，如 002")
     ap.add_argument("--carid-json", type=str, default=DEFAULT_CARID)
     ap.add_argument("--road-time", type=str, default=None, help="指定路侧帧 ts(ms)")
+    ap.add_argument("--anchor", choices=["best", "visualize"], default="best",
+                    help="选帧策略：best=时间差最小(默认)；visualize=锚定 carid 的 visualize_roadtime")
     ap.add_argument("--xlim", type=float, nargs=2, default=list(DEFAULT_XLIM))
     ap.add_argument("--ylim", type=float, nargs=2, default=list(DEFAULT_YLIM))
     ap.add_argument("--lidar-z-extra", type=float, default=LIDAR_Z_EXTRA,
