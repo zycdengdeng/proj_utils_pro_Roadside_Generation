@@ -70,6 +70,11 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 # 路口内"同时在场"判定的距离阈值（用于交互对计数）
 INTERACT_DIST = 15.0
 
+# 图中红色虚线框的名称（数据生成区域，名字未定，改这一行即可）
+REGION_LABEL = "Generation region"
+# 图标题
+FIGURE_TITLE = "Traffic flow complexity of THICV-R2V"
+
 
 # ==================================================================
 # 数据读取
@@ -502,24 +507,37 @@ def _heading_color(h):
     return tuple(hsv_to_rgb([(h % (2 * math.pi)) / (2 * math.pi), 0.72, 0.88]))
 
 
+def _setup_serif_font(plt):
+    """优先 Times New Roman，环境没装则回退到同族衬线字体。"""
+    import matplotlib.font_manager as fm
+    avail = {f.name for f in fm.fontManager.ttflist}
+    serif = [n for n in ("Times New Roman", "Nimbus Roman", "Liberation Serif",
+                         "DejaVu Serif") if n in avail]
+    serif = serif or ["serif"]
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": serif,
+        "mathtext.fontset": "stix",
+        "font.size": 12,
+        "axes.linewidth": 0.8,
+    })
+    return serif[0]
+
+
 def draw_figure(scene_name, region, region_src, metrics, tag,
                 base_pts=None, demo=False):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import gridspec
-    from matplotlib.patches import Rectangle, FancyArrow
+    from matplotlib.patches import Rectangle, FancyArrow, FancyBboxPatch
 
-    plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 11,
-                         "axes.linewidth": 0.8, "mathtext.default": "regular"})
+    _setup_serif_font(plt)
 
-    fig = plt.figure(figsize=(15.5, 8.8))
-    gs = gridspec.GridSpec(3, 3, width_ratios=[2.0, 0.05, 1.0],
-                           height_ratios=[1.55, 0.95, 1.0], wspace=0.16, hspace=0.5)
-    ax = fig.add_subplot(gs[:, 0])
-    ax_card = fig.add_subplot(gs[0, 2])
-    ax_rose = fig.add_subplot(gs[1, 2], projection="polar")
-    ax_time = fig.add_subplot(gs[2, 2])
+    fig = plt.figure(figsize=(13.5, 7.4))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1.95, 1.0], wspace=0.04)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_card = fig.add_subplot(gs[0, 1])
 
     passing = metrics["passing"]
 
@@ -538,12 +556,12 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                                rw, region["y_max"] - region["y_min"],
                                color="#ededed", zorder=0))
 
-    # 路口区域框
+    # 数据生成区域框
     ax.add_patch(Rectangle((region["x_min"], region["y_min"]),
                            region["x_max"] - region["x_min"],
                            region["y_max"] - region["y_min"], fill=False,
                            edgecolor="#d62728", lw=1.8, linestyle=(0, (6, 4)),
-                           zorder=2, label="Intersection region"))
+                           zorder=2, label=REGION_LABEL))
 
     # 轨迹（按航向着色）
     many = len(passing) > 45
@@ -552,7 +570,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ys = [r["y"] for r in fr]
         col = _heading_color(net_heading(fr))
         ax.plot(xs, ys, "-", color=col, lw=1.3 if many else 1.8,
-                alpha=0.75, zorder=4, solid_capstyle="round")
+                alpha=0.78, zorder=4, solid_capstyle="round")
         if not many and len(xs) >= 2:
             dx, dy = xs[-1] - xs[-2], ys[-1] - ys[-2]
             nrm = math.hypot(dx, dy) or 1.0
@@ -575,22 +593,22 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     ax.set_aspect("equal")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title(f"(a) BEV traffic flow through intersection  —  clip {tag}",
-                 fontsize=12, loc="left", fontweight="bold")
+    ax.set_title("(a) Bird's-eye view of traffic flow", fontsize=13, loc="left",
+                 fontweight="bold")
     ax.grid(True, alpha=0.22, lw=0.5)
-    ax.legend(loc="upper right", fontsize=8.5, framealpha=0.92)
+    ax.legend(loc="upper right", fontsize=10, framealpha=0.92)
 
     # 指标面板
     ax_card.axis("off")
     ax_card.set_xlim(0, 1)
     ax_card.set_ylim(0, 1)
-    ax_card.set_title("(b) Complexity metrics", fontsize=12, loc="left",
+    ax_card.set_title("(b) Complexity metrics", fontsize=13, loc="left",
                       fontweight="bold")
     lvl_color = {"High": "#d62728", "Medium": "#ff7f0e", "Low": "#2ca02c"}[metrics["level"]]
     rows = [
         ("Recording length", f"{metrics['duration']:.0f} s"),
         ("Label frames", f"{len(metrics['frame_ts'])}"),
-        ("Vehicles through int.", f"{metrics['n_pass']}"),
+        ("Vehicles through region", f"{metrics['n_pass']}"),
         ("Throughput", f"{metrics['throughput']:.1f} veh/min"),
         ("Peak concurrent", f"{metrics['peak_concurrent']}"),
         ("Mean concurrent", f"{metrics['mean_concurrent']:.1f}"),
@@ -599,60 +617,25 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ("Conflict points", f"{metrics['n_crossings']}"),
         ("Median speed", f"{metrics['mean_speed']:.1f} m/s"),
     ]
-    y, step = 0.95, 0.9 / (len(rows) + 1.6)
+    y_top, y_bot = 0.90, 0.30
+    step = (y_top - y_bot) / (len(rows) - 1)
+    y = y_top
     for k, v in rows:
-        ax_card.text(0.02, y, k, fontsize=9.5, va="center")
-        ax_card.text(0.98, y, v, fontsize=9.5, va="center", ha="right", fontweight="bold")
+        ax_card.text(0.04, y, k, fontsize=11.5, va="center")
+        ax_card.text(0.96, y, v, fontsize=11.5, va="center", ha="right", fontweight="bold")
         y -= step
-    ax_card.text(0.02, y, "Complexity score", fontsize=10.5, va="center", fontweight="bold")
-    ax_card.text(0.98, y, f"{metrics['score']:.0f}/100  ({metrics['level']})",
-                 fontsize=10.5, va="center", ha="right", fontweight="bold", color=lvl_color)
-    by = y - 0.06
-    ax_card.add_patch(plt.Rectangle((0.02, by - 0.035), 0.96, 0.05, color="#e8e8e8"))
-    ax_card.add_patch(plt.Rectangle((0.02, by - 0.035), 0.96 * metrics["score"] / 100.0,
-                                    0.05, color=lvl_color))
 
-    # 方向玫瑰
-    ax_rose.set_title("(c) Heading distribution", fontsize=11, loc="left",
-                      fontweight="bold", pad=10)
-    from matplotlib.colors import hsv_to_rgb
-    headings = [h for h in (net_heading(fr) for fr in passing.values()) if h is not None]
-    nb = 12
-    edges = np.linspace(-math.pi, math.pi, nb + 1)
-    counts, _ = np.histogram(headings, bins=edges)
-    centers = (edges[:-1] + edges[1:]) / 2
-    colors = [hsv_to_rgb([(c % (2 * math.pi)) / (2 * math.pi), 0.72, 0.88]) for c in centers]
-    ax_rose.bar(centers, counts, width=2 * math.pi / nb, color=colors,
-                edgecolor="white", alpha=0.95, align="center")
-    ax_rose.set_theta_zero_location("E")
-    ax_rose.set_theta_direction(1)
-    ax_rose.set_yticklabels([])
-    ax_rose.set_xticks(np.linspace(0, 2 * math.pi, 4, endpoint=False))
-    ax_rose.set_xticklabels(["E", "N", "W", "S"], fontsize=9)
+    # 复杂度评级（红色醒目徽章，无数字）
+    ax_card.text(0.04, 0.205, "Complexity level", fontsize=12.5, va="center",
+                 fontweight="bold")
+    ax_card.add_patch(FancyBboxPatch((0.16, 0.03), 0.68, 0.115,
+                                     boxstyle="round,pad=0.006,rounding_size=0.03",
+                                     linewidth=0, facecolor=lvl_color,
+                                     mutation_aspect=0.5, zorder=3))
+    ax_card.text(0.50, 0.088, metrics["level"].upper(), fontsize=21, va="center",
+                 ha="center", color="white", fontweight="bold", zorder=4)
 
-    # 时序密度
-    ax_time.set_title("(d) Temporal density", fontsize=11, loc="left", fontweight="bold")
-    t0 = metrics["frame_ts"][0]
-    tsec = [(ts - t0) / 1000.0 for ts in metrics["frame_ts"]]
-    ax_time.plot(tsec, metrics["per_frame_counts"], "-", lw=1.6, color="#1f77b4",
-                 label="In intersection")
-    ax_time.set_xlabel("Time (s)")
-    ax_time.set_ylabel("Vehicles", color="#1f77b4")
-    ax_time.tick_params(axis="y", labelcolor="#1f77b4")
-    ax_time.grid(True, alpha=0.3, lw=0.5)
-    ax2 = ax_time.twinx()
-    ax2.plot(tsec, metrics["cumulative"], "-", lw=1.8, color="#d62728",
-             label="Cumulative passed")
-    ax2.set_ylabel("Cumulative", color="#d62728")
-    ax2.tick_params(axis="y", labelcolor="#d62728")
-    l1, lb1 = ax_time.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    ax_time.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="upper left")
-
-    src = "synthetic demo" if demo else f"scene {scene_name}"
-    fig.suptitle(f"Traffic-flow complexity of clip {tag}   "
-                 f"({src};  region: {region_src})",
-                 fontsize=14, fontweight="bold", y=0.995)
+    fig.suptitle(FIGURE_TITLE, fontsize=16, fontweight="bold", y=0.99)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png = OUTPUT_DIR / f"traffic_complexity_{tag}.png"
