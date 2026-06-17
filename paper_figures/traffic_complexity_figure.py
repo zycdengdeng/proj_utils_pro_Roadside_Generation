@@ -558,12 +558,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                                rw, region["y_max"] - region["y_min"],
                                color="#ededed", zorder=0))
 
-    # 数据生成区域框
-    ax.add_patch(Rectangle((region["x_min"], region["y_min"]),
-                           region["x_max"] - region["x_min"],
-                           region["y_max"] - region["y_min"], fill=False,
-                           edgecolor="#d62728", lw=1.8, linestyle=(0, (6, 4)),
-                           zorder=2, label=REGION_LABEL))
+    # 注：分析区域仅用于统计/取景，最终图不再绘制区域框
 
     # 轨迹（按航向着色）
     many = len(passing) > 45
@@ -608,16 +603,15 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                       fontweight="bold")
     lvl_color = {"High": "#d62728", "Medium": "#ff7f0e", "Low": "#2ca02c"}[metrics["level"]]
     rows = [
-        ("Recording length", f"{metrics['duration']:.0f} s"),
-        ("Label frames", f"{len(metrics['frame_ts'])}"),
-        ("Vehicles through region", f"{metrics['n_pass']}"),
-        ("Throughput", f"{metrics['throughput']:.1f} veh/min"),
-        ("Peak concurrent", f"{metrics['peak_concurrent']}"),
-        ("Mean concurrent", f"{metrics['mean_concurrent']:.1f}"),
-        ("Direction entropy", f"{metrics['dir_entropy']:.2f}"),
-        ("Turning vehicles", f"{metrics['n_turners']} ({metrics['turn_ratio']*100:.0f}%)"),
+        ("Duration (s)", f"{metrics['duration']:.0f}"),
+        ("Vehicles annotated", f"{len(metrics['frame_ts'])}"),
+        ("Flow rate (veh/min)", f"{metrics['throughput']:.1f}"),
+        ("Max. vehicles in scene", f"{metrics['peak_concurrent']}"),
+        ("Average vehicles in scene", f"{metrics['mean_concurrent']:.1f}"),
+        ("Directional diversity", f"{metrics['dir_entropy']:.2f}"),
+        ("Turning vehicles (%)", f"{metrics['turn_ratio']*100:.0f}"),
         ("Conflict points", f"{metrics['n_crossings']}"),
-        ("Median speed", f"{metrics['mean_speed']:.1f} m/s"),
+        ("Median speed (m/s)", f"{metrics['mean_speed']:.1f}"),
     ]
     # 指标表（带边框；底部单独一行放复杂度评级，红字，无数字）
     box_top, box_bot, sep_y = 0.965, 0.045, 0.165
@@ -634,7 +628,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         y -= step
 
     cell_y = (sep_y + box_bot) / 2
-    ax_card.text(0.03, cell_y, "Complexity level", fontsize=12.5, va="center",
+    ax_card.text(0.03, cell_y, "Scene complexity", fontsize=12.5, va="center",
                  fontweight="bold")
     ax_card.text(0.97, cell_y, metrics["level"].upper(), fontsize=15, va="center",
                  ha="right", color=lvl_color, fontweight="bold")
