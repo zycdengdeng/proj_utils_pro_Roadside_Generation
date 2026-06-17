@@ -151,9 +151,16 @@ p_road = euler2rotmat(roll,pitch,yaw) @ (p_carlidar + [0,0,h/2+0.25]) + [x,y,z]
 用法：
 
 ```bash
+# 跨所有 clip 找全局时间差最小的那一对来出图（推荐）
+python cross_platform_bev.py --scan-all --dataset-root /mnt/car_road_data_TianJin --workers 64
+
+# 或指定单个 clip
 python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJin
-# 默认范围 x[-140,0] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
+# 默认范围 x[-130,20] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
 ```
+
+`--scan-all`：并行遍历 dataset-root 下所有 clip，打印各 clip 最小车端/路侧时间差的排名，
+选全局最小的渲染（`--workers` 控制并行数）。
 
 常用开关：`--anchor best|visualize` 选帧策略；`--road-time <ms>` 手动指定路侧帧；
 `--xlim/--ylim` 改范围；`--car-yaw-offset <deg>` 纠正车端 LiDAR 安装朝向（若车端点云整体转了角度）；

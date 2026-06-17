@@ -42,7 +42,7 @@ DEFAULT_ROOT = "/mnt/car_road_data_TianJin"
 DEFAULT_CARID = "/mnt/car_road_data_TianJin/support_info/carid.json"
 
 # 展示范围
-DEFAULT_XLIM = (-140.0, 0.0)
+DEFAULT_XLIM = (-130.0, 20.0)
 DEFAULT_YLIM = (-50.0, 25.0)
 LIDAR_Z_EXTRA = 0.25  # 虚拟 LiDAR 在 bbox 顶部之上的偏移（ego_transform 约定）
 
@@ -221,6 +221,82 @@ def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
 # ==================================================================
 # 主流程
 # ==================================================================
+# ==================================================================
+# 跨 clip 搜索：找全局时间差最小的配对
+# ==================================================================
+def clip_best_gap(clip_dir, carid_json):
+    """单 clip 的最小车端/路侧时间差配对（供并行调用）。返回 dict 或 None。"""
+    import bisect
+    name = os.path.basename(os.path.normpath(clip_dir))
+    road_pcd_dir = os.path.join(clip_dir, "road", "lidar", "merged_pcd")
+    road_lab_dir = os.path.join(clip_dir, "road_labels", "interpolation_labels")
+    car_pcd_dir = os.path.join(clip_dir, "car", "pcds", "main")
+    if not all(os.path.isdir(d) for d in (road_pcd_dir, road_lab_dir, car_pcd_dir)):
+        return None
+    entry = load_carid_entry(carid_json, name)
+    if entry is None:
+        return None
+    ego_id = entry["nearest_carid"]
+    road_list = _ts_list(road_pcd_dir, "ms")
+    car_list = _ts_list(car_pcd_dir, "s")
+    if not road_list or not car_list:
+        return None
+    car_ts = sorted(t for t, _ in car_list)
+
+    def _gap(rts):
+        i = bisect.bisect_left(car_ts, rts)
+        return min((abs(car_ts[j] - rts) for j in (i - 1, i, i + 1)
+                    if 0 <= j < len(car_ts)), default=None)
+
+    cand = sorted(((g, rts) for rts, _ in road_list
+                   if (g := _gap(rts)) is not None), key=lambda kv: kv[0])
+    # 按 gap 从小到大，取首个"该路侧帧含自车 id"的配对
+    for gap, rts in cand[:80]:
+        lab = os.path.join(road_lab_dir, f"{rts}.json")
+        if not os.path.exists(lab):
+            continue
+        try:
+            objs = json.load(open(lab)).get("object", [])
+        except Exception:
+            continue
+        if any(o.get("id") == ego_id for o in objs):
+            i = bisect.bisect_left(car_ts, rts)
+            cts = min((car_ts[j] for j in (i - 1, i, i + 1) if 0 <= j < len(car_ts)),
+                      key=lambda c: abs(c - rts))
+            return {"clip": name, "clip_dir": clip_dir, "gap": gap,
+                    "road_ts": rts, "car_ts": cts, "ego_id": ego_id}
+    return None
+
+
+def scan_all_clips(args):
+    """遍历 dataset-root 下所有 clip，挑全局时间差最小的，返回该 clip 的配对信息。"""
+    import concurrent.futures as cf
+    clip_dirs = [os.path.abspath(p) for p in sorted(glob.glob(os.path.join(args.dataset_root, "*")))
+                 if os.path.isdir(os.path.join(p, "road", "lidar", "merged_pcd"))]
+    if not clip_dirs:
+        raise SystemExit(f"{args.dataset_root} 下没发现含 road/lidar/merged_pcd 的 clip")
+    print(f"[INFO] 扫描 {len(clip_dirs)} 个 clip，找全局最小时间差 ...")
+    workers = args.workers or min(64, os.cpu_count() or 8)
+    results = []
+    with cf.ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(clip_best_gap, d, args.carid_json): d for d in clip_dirs}
+        for fut in cf.as_completed(futs):
+            r = fut.result()
+            if r:
+                results.append(r)
+    if not results:
+        raise SystemExit("没有任何 clip 能配对（缺 carid 记录或点云/标注）")
+    results.sort(key=lambda r: r["gap"])
+    print(f"\n{'='*60}\n各 clip 最小车端/路侧时间差（升序，前 15）\n{'='*60}")
+    print(f"{'#':>3}  {'clip':<34}{'gap(ms)':>8}  road_ts")
+    for i, r in enumerate(results[:15], 1):
+        print(f"{i:>3}  {r['clip']:<34}{r['gap']:>8}  {r['road_ts']}")
+    best = results[0]
+    print(f"\n[INFO] 全局最优: {best['clip']}  gap={best['gap']} ms  "
+          f"road_ts={best['road_ts']} car_ts={best['car_ts']}")
+    return best
+
+
 def build_frame(args):
     clip_dir = resolve_clip_dir(args)
     clip_name = os.path.basename(clip_dir)
@@ -351,7 +427,16 @@ def main():
     ap.add_argument("--car-yaw-offset", type=float, default=0.0,
                     help="车端 LiDAR 安装朝向修正(度)；若车端点云整体转了角度用它纠正")
     ap.add_argument("--max-points", type=int, default=400000)
+    ap.add_argument("--scan-all", action="store_true",
+                    help="遍历 dataset-root 下所有 clip，挑全局时间差最小的渲染")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="--scan-all 并行进程数（默认 min(64, CPU核数)）")
     args = ap.parse_args()
+
+    if args.scan_all:
+        best = scan_all_clips(args)
+        args.clip_dir = best["clip_dir"]
+        args.road_time = str(best["road_ts"])
 
     clip_name, road_pts, car_pts, labels, ego = build_frame(args)
     draw(clip_name, road_pts, car_pts, labels, ego, args)
