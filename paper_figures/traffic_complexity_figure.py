@@ -801,6 +801,75 @@ def run_scan(args):
                 print(f"  [{r['clip']}] 渲染失败: {e}")
 
 
+def resolve_clip_dir(token, dataset_root):
+    """把 clip 名/前缀/路径解析成绝对目录。"""
+    if os.path.isdir(token):
+        return os.path.abspath(token)
+    matches = [m for m in sorted(glob.glob(os.path.join(dataset_root, token + "*")))
+               if os.path.isdir(m)]
+    if not matches:
+        raise FileNotFoundError(f"在 {dataset_root} 下找不到匹配 {token}* 的 clip 目录")
+    return os.path.abspath(matches[0])
+
+
+def build_overlay(tokens, args):
+    """叠加多个（不同朝向的）clip：时间重基对齐 + 合并到同一路口坐标系。
+
+    Returns: (merged_tracks, frame_ts, region, region_src, base_pts, tag, dirs)
+    """
+    dirs = [resolve_clip_dir(t, args.dataset_root) for t in tokens]
+    print(f"[INFO] 叠加 {len(dirs)} 个 clip:")
+    for d in dirs:
+        print(f"    {d}")
+
+    # 路口区域（叠加必须共用同一框）
+    region, region_src = None, None
+    if args.region:
+        x0, x1, y0, y1 = args.region
+        region = {"x_min": min(x0, x1), "x_max": max(x0, x1),
+                  "y_min": min(y0, y1), "y_max": max(y0, y1)}
+        region_src = "manual"
+    elif args.reference_region:
+        region = reference_region(args.dataset_root)
+        region_src = "reference-vehicles" if region else None
+
+    # 读各 clip，估计统一时间网格
+    per_clip, intervals = [], []
+    for d in dirs:
+        ld = find_label_dir(d, args.labels_subdir)
+        tr, fts = read_all_labels(ld, args.ts_start, args.ts_end)
+        if not tr:
+            print(f"[WARN] {os.path.basename(d)} 无轨迹，跳过")
+            continue
+        per_clip.append((d, tr, fts))
+        intervals += [b - a for a, b in zip(fts[:-1], fts[1:]) if b > a]
+    if not per_clip:
+        raise RuntimeError("叠加的 clip 都没有可用轨迹")
+    bin_ms = max(int(np.median(intervals)) if intervals else 100, 1)
+
+    # 时间重基（各自从 0 开始，snap 到统一网格）+ 车辆 id 去重
+    merged, merged_ts, short = {}, set(), []
+    for i, (d, tr, fts) in enumerate(per_clip):
+        t0 = fts[0]
+        for vid, fr in tr.items():
+            nfr = []
+            for r in fr:
+                nts = int(round((r["ts"] - t0) / bin_ms)) * bin_ms
+                nr = dict(r); nr["ts"] = nts
+                nfr.append(nr); merged_ts.add(nts)
+            merged[i * 1_000_000 + vid] = nfr
+        short.append(os.path.basename(d).split("_")[0])
+    frame_ts = sorted(merged_ts)
+
+    if region is None:
+        region, region_src = resolve_region(args, merged)
+
+    tag = "overlay_" + "+".join(short)
+    mid = (per_clip[0][2][0] + per_clip[0][2][-1]) // 2
+    base_pts = None if args.no_pcd else get_base_pcd(per_clip[0][0], mid)
+    return merged, frame_ts, region, region_src, base_pts, tag, dirs
+
+
 def render_clip(clip_dir, args, fixed_region=None):
     """读取 + 计算 + 绘图，返回 (png, pdf, metrics)。fixed_region 为 (region, src) 或 None。"""
     clip_dir = os.path.abspath(clip_dir)
@@ -858,10 +927,31 @@ def main():
                     help="--scan 终端打印的排名条数（默认15，CSV 始终全量）")
     ap.add_argument("--plot-top", type=int, default=1,
                     help="--scan 后渲染前 N 个最复杂 clip 的论文图（默认1，0=不渲染）")
+    # 叠加不同朝向的 clip
+    ap.add_argument("--overlay-clips", type=str, nargs="+", default=None,
+                    metavar="CLIP",
+                    help="叠加多个不同朝向的 clip（名/前缀/路径），如 "
+                         "--overlay-clips 010 051；轨迹时间重基对齐后合并到同一路口")
     args = ap.parse_args()
 
     if args.scan:
         run_scan(args)
+        return
+
+    if args.overlay_clips:
+        tracks, frame_ts, region, region_src, base_pts, tag, _ = build_overlay(
+            args.overlay_clips, args)
+        metrics = compute_metrics(tracks, frame_ts, region)
+        print("\n=== Overlay traffic-flow complexity ===")
+        print(f"  region              : x[{region['x_min']:.1f},{region['x_max']:.1f}] "
+              f"y[{region['y_min']:.1f},{region['y_max']:.1f}]  ({region_src})")
+        for k in ("n_pass", "duration", "throughput", "peak_concurrent",
+                  "mean_concurrent", "dir_entropy", "turn_ratio", "n_crossings",
+                  "mean_speed", "score", "level"):
+            print(f"  {k:18s}: {metrics[k]}")
+        png, pdf = draw_figure(tag, region, region_src, metrics, tag,
+                               base_pts=base_pts, demo=False)
+        print(f"\n[OK] 叠加图已保存:\n  {png}\n  {pdf}")
         return
 
     if args.demo:

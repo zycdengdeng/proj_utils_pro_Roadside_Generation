@@ -85,6 +85,27 @@ python traffic_complexity_figure.py --scan \
 典型流程：先 `--scan` 拿到排名 → 看 CSV/终端选定要展示的 clip → 若想换一个，单独对它跑
 `--clip-dir <那个clip> --reference-region --dataset-root ...` 出最终图。
 
+## 叠加不同朝向的 clip（推荐用于论文展示）
+
+每个 clip 只录了**一个朝向**（绿灯）的车流，单独看不够"复杂"。把**垂直方向**的两个
+（或多个）clip 叠加到同一路口，就能展示真实的交叉车流复杂度。因为这些 clip 都在**同一
+物理路口**（共享世界坐标），叠加在几何上成立：
+
+```bash
+python traffic_complexity_figure.py --overlay-clips 010 051 \
+  --dataset-root /mnt/car_road_data_TianJin \
+  --reference-region
+# 010 是东西向、051 是南北向 -> 合成一个有交叉车流的复杂路口图
+```
+
+- 多个 clip 的轨迹会**时间重基对齐**（各自从 0 开始），让不同方向的车流"同时"通过路口，
+  路口中心因此产生大量交叉冲突点（✕），真实反映复杂度。
+- 轨迹**按航向着色**：东西向与南北向天然不同色系，一眼可分。
+- 可叠加 2 个以上，例如四个方向各取一个 `--overlay-clips 010 051 002 021`，合成一个满负荷路口。
+- 区域务必统一（`--reference-region` 或 `--region`），否则坐标对不齐。
+
+输出：`paper_figures/output/traffic_complexity_overlay_<前缀+前缀>.png` / `.pdf`。
+
 常用开关：
 
 | 参数 | 说明 |
