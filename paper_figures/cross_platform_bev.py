@@ -41,9 +41,10 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_ROOT = "/mnt/car_road_data_TianJin"
 DEFAULT_CARID = "/mnt/car_road_data_TianJin/support_info/carid.json"
 
-# 展示范围（世界坐标）：x 宽 70、y 宽 150；配合 --swap-xy 后水平轴=世界Y(长150)、竖直=世界X(70)
-DEFAULT_XLIM = (-90.0, -20.0)
-DEFAULT_YLIM = (-87.5, 62.5)
+# 展示范围（世界坐标）：在 x宽70/y宽150 基础上各放大 1.5×、中心不变
+# x: 中心 -55, 宽 105; y: 中心 -12.5, 宽 225
+DEFAULT_XLIM = (-107.5, -2.5)
+DEFAULT_YLIM = (-125.0, 100.0)
 LIDAR_Z_EXTRA = 0.25  # 虚拟 LiDAR 在 bbox 顶部之上的偏移（ego_transform 约定）
 
 FIGURE_TITLE = "Cross-platform LiDAR and annotation alignment (THICV-R2V)"
