@@ -181,8 +181,11 @@ def _ego_in_range(ego, ego_x_range, ego_y_range):
 
 
 def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                 ego_x_range=None, ego_y_range=None):
-    """若该路侧帧有 pcd+label、含自车 id（且自车 x/y 在指定范围内），返回配对，否则 None。"""
+                 ego_x_range=None, ego_y_range=None, target_gap=0):
+    """若该路侧帧有 pcd+label、含自车 id（且自车 x/y 在指定范围内），返回配对，否则 None。
+
+    gap = car_ts - road_ts（有符号，正=车端晚于路侧）；cost = |gap - target_gap|，用于选帧。
+    """
     road_pcd = os.path.join(road_pcd_dir, f"{road_ts}.pcd")
     lab = os.path.join(road_lab_dir, f"{road_ts}.json")
     if not (os.path.exists(road_pcd) and os.path.exists(lab)):
@@ -193,21 +196,23 @@ def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
         return None
     if not _ego_in_range(ego, ego_x_range, ego_y_range):
         return None
-    car_ts, car_pcd = nearest(car_list, road_ts)
+    car_ts, car_pcd = nearest(car_list, road_ts + target_gap)
+    signed = car_ts - road_ts
     return {"road_ts": road_ts, "road_pcd": road_pcd, "labels": objs, "ego": ego,
-            "car_ts": car_ts, "car_pcd": car_pcd, "gap": abs(car_ts - road_ts)}
+            "car_ts": car_ts, "car_pcd": car_pcd, "gap": signed,
+            "cost": abs(signed - target_gap)}
 
 
 def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                 visualize_ts, ego_x_range=None, ego_y_range=None):
+                 visualize_ts, ego_x_range=None, ego_y_range=None, target_gap=0):
     """选路侧/车端配对帧。
 
-    --road-time: 用指定帧（不加自车约束）；--anchor visualize: 锚定 visualize_roadtime；
-    默认 (best): 遍历所有含自车 id（且自车 x/y 在范围内）的路侧帧，选时间差最小的配对。
+    --road-time: 用指定帧；--anchor visualize: 锚定 visualize_roadtime；
+    默认 (best): 遍历所有含自车 id（且自车 x/y 在范围内）的路侧帧，选 gap 最接近 target_gap 的配对。
     """
     if args.road_time:
         f = _try_road_ts(int(args.road_time), road_pcd_dir, road_lab_dir,
-                         car_list, ego_id)
+                         car_list, ego_id, target_gap=target_gap)
         if f:
             return f
         print("[WARN] 指定的 --road-time 无效（缺 pcd/label 或无自车），改用最优搜索")
@@ -215,17 +220,17 @@ def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
     if args.anchor == "visualize" and visualize_ts:
         for road_ts, _ in sorted(road_list, key=lambda kv: abs(kv[0] - visualize_ts)):
             f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                             ego_x_range, ego_y_range)
+                             ego_x_range, ego_y_range, target_gap)
             if f:
                 return f
 
     best = None
     for road_ts, _ in road_list:
         f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                         ego_x_range, ego_y_range)
-        if f and (best is None or f["gap"] < best["gap"]):
+                         ego_x_range, ego_y_range, target_gap)
+        if f and (best is None or f["cost"] < best["cost"]):
             best = f
-            if best["gap"] == 0:
+            if best["cost"] == 0:
                 break
     return best
 
@@ -236,8 +241,9 @@ def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
 # ==================================================================
 # 跨 clip 搜索：找全局时间差最小的配对
 # ==================================================================
-def clip_best_gap(clip_dir, carid_json, ego_x_range=None, ego_y_range=None):
-    """单 clip 的最小车端/路侧时间差配对（自车 x/y 须在范围内）。返回 dict 或 None。"""
+def clip_best_gap(clip_dir, carid_json, ego_x_range=None, ego_y_range=None,
+                  target_gap=0):
+    """单 clip 中 gap 最接近 target_gap 的配对（自车 x/y 须在范围内）。返回 dict 或 None。"""
     import bisect
     name = os.path.basename(os.path.normpath(clip_dir))
     road_pcd_dir = os.path.join(clip_dir, "road", "lidar", "merged_pcd")
@@ -255,15 +261,22 @@ def clip_best_gap(clip_dir, carid_json, ego_x_range=None, ego_y_range=None):
         return None
     car_ts = sorted(t for t, _ in car_list)
 
-    def _gap(rts):
-        i = bisect.bisect_left(car_ts, rts)
-        return min((abs(car_ts[j] - rts) for j in (i - 1, i, i + 1)
-                    if 0 <= j < len(car_ts)), default=None)
+    def _best_car(rts):
+        """返回离 (rts+target_gap) 最近的车端帧 -> (cost, signed_gap, car_ts)。"""
+        t = rts + target_gap
+        i = bisect.bisect_left(car_ts, t)
+        best = None
+        for j in (i - 1, i, i + 1):
+            if 0 <= j < len(car_ts):
+                c = abs(car_ts[j] - t)
+                if best is None or c < best[0]:
+                    best = (c, car_ts[j] - rts, car_ts[j])
+        return best
 
-    cand = sorted(((g, rts) for rts, _ in road_list
-                   if (g := _gap(rts)) is not None), key=lambda kv: kv[0])
-    # 按 gap 从小到大，取首个"含自车 id 且自车 x 在范围内"的帧
-    for gap, rts in cand:
+    cand = sorted(((bc[0], bc[1], bc[2], rts) for rts, _ in road_list
+                   if (bc := _best_car(rts)) is not None), key=lambda kv: kv[0])
+    # 按 cost(到 target_gap 的距离) 从小到大，取首个"含自车 id 且自车 x/y 在范围内"的帧
+    for cost, signed, cts, rts in cand:
         lab = os.path.join(road_lab_dir, f"{rts}.json")
         if not os.path.exists(lab):
             continue
@@ -276,10 +289,7 @@ def clip_best_gap(clip_dir, carid_json, ego_x_range=None, ego_y_range=None):
             continue
         if not _ego_in_range(ego, ego_x_range, ego_y_range):
             continue
-        i = bisect.bisect_left(car_ts, rts)
-        cts = min((car_ts[j] for j in (i - 1, i, i + 1) if 0 <= j < len(car_ts)),
-                  key=lambda c: abs(c - rts))
-        return {"clip": name, "clip_dir": clip_dir, "gap": gap,
+        return {"clip": name, "clip_dir": clip_dir, "gap": signed, "cost": cost,
                 "road_ts": rts, "car_ts": cts, "ego_id": ego_id,
                 "ego_x": round(ego["x"], 1), "ego_y": round(ego["y"], 1)}
     return None
@@ -323,13 +333,14 @@ def scan_all_clips(args):
     else:
         print(f"[WARN] 未找到复杂度 CSV（{args.complexity_csv}），在全部 clip 中搜索")
     print(f"[INFO] 约束: 自车 x ∈ [{args.ego_x_min}, {args.ego_x_max}], "
-          f"y ∈ [{args.ego_y_min}, {args.ego_y_max}]；共 {len(clip_dirs)} 个候选")
+          f"y ∈ [{args.ego_y_min}, {args.ego_y_max}]；目标时间差 {args.target_gap} ms；"
+          f"共 {len(clip_dirs)} 个候选")
 
     workers = args.workers or min(64, os.cpu_count() or 8)
     results = []
     with cf.ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(clip_best_gap, d, args.carid_json, ego_x_range, ego_y_range): d
-                for d in clip_dirs}
+        futs = {ex.submit(clip_best_gap, d, args.carid_json, ego_x_range,
+                          ego_y_range, args.target_gap): d for d in clip_dirs}
         for fut in cf.as_completed(futs):
             r = fut.result()
             if r:
@@ -338,7 +349,7 @@ def scan_all_clips(args):
     if not results:
         raise SystemExit("候选 clip 里没有满足(含自车 id + 自车 x/y 在范围内)的帧；"
                          "可放宽 --ego-x-min/max 或 --ego-y-min/max")
-    results.sort(key=lambda r: r["gap"])
+    results.sort(key=lambda r: r["cost"])
     print(f"\n{'='*76}\n候选 clip：自车 x/y 在范围内的最小时间差（按 gap 升序）\n{'='*76}")
     print(f"{'#':>3}  {'clip':<34}{'score':>6}{'gap(ms)':>8}{'ego_x':>8}{'ego_y':>8}")
     for i, r in enumerate(results[:15], 1):
@@ -378,7 +389,8 @@ def build_frame(args):
     ego_x_range = (args.ego_x_min, args.ego_x_max)
     ego_y_range = (args.ego_y_min, args.ego_y_max)
     frame = choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list,
-                         ego_id, visualize_ts, ego_x_range, ego_y_range)
+                         ego_id, visualize_ts, ego_x_range, ego_y_range,
+                         args.target_gap)
     if frame is None:
         raise SystemExit(f"找不到含自车 id={ego_id} 且有点云的路侧帧")
     road_ts, car_ts = frame["road_ts"], frame["car_ts"]
@@ -511,7 +523,10 @@ def main():
     ap.add_argument("--carid-json", type=str, default=DEFAULT_CARID)
     ap.add_argument("--road-time", type=str, default=None, help="指定路侧帧 ts(ms)")
     ap.add_argument("--anchor", choices=["best", "visualize"], default="best",
-                    help="选帧策略：best=时间差最小(默认)；visualize=锚定 carid 的 visualize_roadtime")
+                    help="选帧策略：best=gap 最接近 target(默认)；visualize=锚定 carid 的 visualize_roadtime")
+    ap.add_argument("--target-gap", type=float, default=0.0,
+                    help="期望的车端-路侧时间差 ms(有符号,正=车端晚于路侧)；"
+                         "选帧时挑 gap 最接近此值的(如 5 表示车比路晚约5ms)")
     ap.add_argument("--xlim", type=float, nargs=2, default=list(DEFAULT_XLIM))
     ap.add_argument("--ylim", type=float, nargs=2, default=list(DEFAULT_YLIM))
     ap.add_argument("--lidar-z-extra", type=float, default=LIDAR_Z_EXTRA,
