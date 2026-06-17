@@ -607,8 +607,8 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
         ("Duration (s)", f"{metrics['duration']:.0f}"),
         ("Vehicles annotated", f"{metrics['n_total']}"),
         ("Flow rate (veh/min)", f"{metrics['throughput']:.1f}"),
-        ("Max. vehicles in scene", f"{metrics['peak_concurrent']}"),
-        ("Average vehicles in scene", f"{metrics['mean_concurrent']:.1f}"),
+        ("Max. vehicles in intersection", f"{metrics['peak_concurrent']}"),
+        ("Average vehicles in intersection", f"{metrics['mean_concurrent']:.1f}"),
         ("Directional diversity", f"{metrics['dir_entropy']:.2f}"),
         ("Turning vehicles (%)", f"{metrics['turn_ratio']*100:.0f}"),
         ("Conflict points", f"{metrics['n_crossings']}"),
@@ -640,7 +640,7 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     t0 = metrics["frame_ts"][0]
     tsec = [(ts - t0) / 1000.0 for ts in metrics["frame_ts"]]
     ax_time.plot(tsec, metrics["per_frame_counts"], "-", lw=1.7, color="#1f77b4",
-                 label="In region")
+                 label="In intersection")
     ax_time.set_xlabel("Time (s)")
     ax_time.set_ylabel("Vehicles", color="#1f77b4")
     ax_time.tick_params(axis="y", labelcolor="#1f77b4")
