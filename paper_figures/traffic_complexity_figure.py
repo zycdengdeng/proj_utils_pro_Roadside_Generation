@@ -3,36 +3,45 @@
 """
 Traffic-flow complexity figure for one clip (publication-quality).
 
-为数据集论文绘制"单个 clip 交通流复杂程度"图。思路沿用 intersection_filter.py：
-在路口矩形区域内、在该 clip 的时间窗口 [ts_start, ts_end] 内，重建 **所有** 车辆
-（不仅是参考车）的 BEV 轨迹，并量化交通流复杂度。
+为数据集论文绘制"某一个 clip 的交通流复杂程度"图。
 
-图由四部分组成（可单独开关）：
-  1. BEV 多车轨迹       —— 俯视图叠加该 clip 内所有车辆轨迹，按车辆着色，
-                            起点圆点、终点箭头表示行驶方向；红色 ✕ 标注轨迹交叉/冲突点。
-  2. 复杂度指标面板     —— 在场车辆数、峰值/平均同时在场数、方向熵、转向比例、
-                            交叉冲突点数、综合复杂度评分等。
-  3. 时序密度曲线       —— 每帧"在场车辆数"与"交互对数"随帧变化。
-  4. 点云/路口底图       —— 真实 LiDAR 点云作底图（无数据时用示意路口）。
+概念（重要）
+-----------
+一个 clip = 一整段路侧录制目录，例如::
+
+    /mnt/car_road_data_TianJin/002_car0325_road0327_t2/
+
+其路侧标注在 ``road_labels/interpolation_labels/*.json``（文件名是毫秒时间戳）。
+我们用**全时序**的所有标注帧，统计**通过该路口**的车辆，量化交通流复杂度。
+
+  ⚠ 注意：旧流水线里每段固定 "29 帧"，那是为某辆自车选出它过路口的那几帧用来
+  出 video 的；算复杂度**不需要**这个限制 —— 这里用整段录制的全部帧。
+  （`--vid 29` 那种是"车辆 id"，与帧数无关，别混淆。）
+
+图由四部分组成
+-------------
+  (a) BEV traffic flow   俯视图叠加所有"通过路口"的车辆轨迹，按行驶方向(航向)着色，
+                         终点箭头表方向；黑色 ✕ 标注路口内轨迹交叉/冲突点；
+                         红色虚线框为路口区域；底图为 LiDAR 点云（或示意路口）。
+  (b) Complexity metrics 通过路口车辆数、吞吐量(veh/min)、峰值/平均同时在路口数、
+                         方向熵、转向比例、冲突点数、平均车速，及 0~100 综合复杂度评分。
+  (c) Heading rose       通过车辆净行驶方向的极坐标玫瑰图。
+  (d) Temporal density   每帧"路口内车辆数"与"累计通过数"随时间变化。
 
 用法
 ----
-真实数据（在挂载了 /mnt/car_road_data_fix 的机器上运行）::
+真实数据::
 
-    # 直接从 intersection_filter 的 filtered_segments.json 选第 0 个片段
-    python traffic_complexity_figure.py --from-segments 0
+    python traffic_complexity_figure.py --clip-dir /mnt/car_road_data_TianJin/002_car0325_road0327_t2
+    # 或：--dataset-root /mnt/car_road_data_TianJin --clip 002
+    # 限定时间窗：--ts-start 1742877424148 --ts-end 1742877460000
+    # 自定义路口区域：--region xmin xmax ymin ymax （否则自动估计或读 intersection_filter）
 
-    # 或显式指定一个 clip
-    python traffic_complexity_figure.py --scene 002 --vid 29 --seg 0
-
-    # 或给定场景 + 时间窗口
-    python traffic_complexity_figure.py --scene 002 --ts-start 1742877436322 --ts-end 1742877441799
-
-合成演示（无需真实数据，用于验证脚本/预览版式）::
+合成演示（无需真实数据）::
 
     python traffic_complexity_figure.py --demo
 
-输出：paper_figures/output/traffic_complexity_<tag>.png / .pdf
+输出：paper_figures/output/traffic_complexity_<tag>.png（300 dpi）+ .pdf（矢量）
 """
 
 import os
@@ -46,106 +55,98 @@ from collections import defaultdict
 
 import numpy as np
 
-# ------------------------------------------------------------------
-# 复用仓库公共配置（可选；真实数据模式需要）
-# ------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from common_utils import DATASET_ROOT, get_scene_paths  # noqa: E402
-except Exception:  # pragma: no cover - 仅在仓库结构变动时触发
-    DATASET_ROOT = "/mnt/car_road_data_fix"
-    get_scene_paths = None
+    from common_utils import DATASET_ROOT as _DEFAULT_ROOT  # noqa: E402
+except Exception:
+    _DEFAULT_ROOT = "/mnt/car_road_data_fix"
 
-# 与 intersection_filter.py 保持一致
 VEHICLE_LABELS = {"Car", "Suv", "Truck", "Bus", "Van"}
-SEGMENT_LENGTH = 29
-
 INTERSECTION_FILTER_DIR = REPO_ROOT / "intersection_filter" / "output"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
+# 路口内"同时在场"判定的距离阈值（用于交互对计数）
+INTERACT_DIST = 15.0
+
 
 # ==================================================================
-# 数据读取（真实数据）
+# 数据读取
 # ==================================================================
-def _label_dir_for_scene(scene_prefix):
-    if get_scene_paths is None:
-        return None
-    paths = get_scene_paths(scene_prefix)
-    if not paths:
-        return None
-    return paths.get("roadside_labels")
+def find_label_dir(clip_dir, override=None):
+    """在 clip 目录下定位路侧标注目录（含时间戳 *.json）。"""
+    clip_dir = Path(clip_dir)
+    if override:
+        cand = clip_dir / override if not os.path.isabs(override) else Path(override)
+        if cand.is_dir():
+            return str(cand)
+    # 默认与仓库 common_utils 一致
+    default = clip_dir / "road_labels" / "interpolation_labels"
+    if default.is_dir():
+        return str(default)
+    # 兜底：递归查找含数字时间戳 json 的目录
+    for sub in clip_dir.rglob("interpolation_labels"):
+        if sub.is_dir():
+            return str(sub)
+    for sub in clip_dir.rglob("*.json"):
+        if sub.stem.isdigit():
+            return str(sub.parent)
+    raise FileNotFoundError(
+        f"在 {clip_dir} 下找不到路侧标注目录（期望 road_labels/interpolation_labels/*.json）"
+    )
 
 
 def _heading_of(obj, prev_xy=None):
-    """获取目标朝向（弧度，atan2 约定，x 向右、y 向上）。
-
-    优先 yaw，其次速度 (vx, vy)，最后用相邻位移。返回 None 表示未知。
-    """
-    if "yaw" in obj and obj["yaw"] is not None:
+    """目标航向（弧度，x 向右 y 向上）。优先 yaw，其次速度，最后相邻位移。"""
+    if obj.get("yaw") is not None:
         return float(obj["yaw"])
     vx, vy = obj.get("vx"), obj.get("vy")
     if vx is not None and vy is not None and (abs(vx) + abs(vy)) > 1e-3:
         return math.atan2(vy, vx)
     if prev_xy is not None:
-        dx = obj["x"] - prev_xy[0]
-        dy = obj["y"] - prev_xy[1]
+        dx, dy = obj["x"] - prev_xy[0], obj["y"] - prev_xy[1]
         if abs(dx) + abs(dy) > 1e-3:
             return math.atan2(dy, dx)
     return None
 
 
-def collect_tracks(scene_prefix, ts_start, ts_end, region=None):
-    """读取时间窗口 [ts_start, ts_end] 内的所有车辆轨迹。
+def read_all_labels(label_dir, ts_start=None, ts_end=None):
+    """读取整段录制（或时间窗）内所有车辆轨迹。
 
     Returns
     -------
-    tracks : dict[int, list[dict]]   vid -> [{ts,x,y,yaw,label}, ...]（按时间排序）
-    frame_ts : list[int]             落入窗口的去重时间戳（升序）
+    tracks : dict[int, list[dict{ts,x,y,yaw,label}]]  （按时间排序的完整轨迹）
+    frame_ts : list[int]   所有标注帧时间戳（升序）
     """
-    label_dir = _label_dir_for_scene(scene_prefix)
-    if not label_dir or not os.path.isdir(label_dir):
-        raise FileNotFoundError(
-            f"找不到场景 {scene_prefix} 的标注目录: {label_dir}\n"
-            f"（真实数据需要挂载 {DATASET_ROOT}；无数据时请用 --demo）"
-        )
-
     files = sorted(glob.glob(os.path.join(label_dir, "*.json")))
     tracks = defaultdict(list)
     frame_ts = []
     prev_xy = {}
-
     for lf in files:
         try:
             ts = int(Path(lf).stem)
         except ValueError:
             continue
-        if ts < ts_start or ts > ts_end:
+        if ts_start is not None and ts < ts_start:
+            continue
+        if ts_end is not None and ts > ts_end:
             continue
         with open(lf, "r") as f:
             data = json.load(f)
-
-        kept = False
+        frame_ts.append(ts)
         for obj in data.get("object", []):
             if obj.get("label") not in VEHICLE_LABELS:
                 continue
             x, y = float(obj["x"]), float(obj["y"])
-            if region is not None and not _in_region(x, y, region):
-                continue
             vid = obj["id"]
             yaw = _heading_of(obj, prev_xy.get(vid))
             tracks[vid].append({"ts": ts, "x": x, "y": y, "yaw": yaw,
-                                 "label": obj.get("label", "Car")})
+                                "label": obj.get("label", "Car")})
             prev_xy[vid] = (x, y)
-            kept = True
-        if kept:
-            frame_ts.append(ts)
-
     for vid in tracks:
         tracks[vid].sort(key=lambda r: r["ts"])
-    frame_ts = sorted(set(frame_ts))
-    return dict(tracks), frame_ts
+    return dict(tracks), sorted(set(frame_ts))
 
 
 def _in_region(x, y, region):
@@ -153,149 +154,100 @@ def _in_region(x, y, region):
             region["y_min"] <= y <= region["y_max"])
 
 
-def load_region():
-    """从 intersection_filter 输出加载路口矩形区域（若存在）。"""
-    rf = INTERSECTION_FILTER_DIR / "intersection_region.json"
+def resolve_region(args, tracks):
+    """确定路口矩形区域。优先级：--region > --region-json > intersection_filter > 自动估计。"""
+    if args.region:
+        x0, x1, y0, y1 = args.region
+        return ({"x_min": min(x0, x1), "x_max": max(x0, x1),
+                 "y_min": min(y0, y1), "y_max": max(y0, y1)}, "manual")
+    rf = Path(args.region_json) if args.region_json else \
+        (INTERSECTION_FILTER_DIR / "intersection_region.json")
     if rf.exists():
         with open(rf, "r") as f:
-            return json.load(f).get("region")
-    return None
-
-
-def region_from_tracks(tracks, pad=8.0):
+            reg = json.load(f).get("region")
+        if reg:
+            return reg, f"file:{rf.name}"
+    # 自动估计：以所有车辆位置中位数为中心，± half
     xs, ys = [], []
-    for frames in tracks.values():
-        xs += [r["x"] for r in frames]
-        ys += [r["y"] for r in frames]
+    for fr in tracks.values():
+        xs += [r["x"] for r in fr]
+        ys += [r["y"] for r in fr]
     if not xs:
-        return None
-    return {"x_min": min(xs) - pad, "x_max": max(xs) + pad,
-            "y_min": min(ys) - pad, "y_max": max(ys) + pad}
-
-
-def resolve_clip(args):
-    """根据命令行参数确定一个 clip：返回 (scene, ts_start, ts_end, tag, ego_vid)。"""
-    if args.from_segments is not None:
-        sf = INTERSECTION_FILTER_DIR / "filtered_segments.json"
-        if not sf.exists():
-            raise FileNotFoundError(f"未找到 {sf}，请先运行 intersection_filter.py")
-        with open(sf, "r") as f:
-            segs = json.load(f)
-        if not segs:
-            raise ValueError("filtered_segments.json 为空")
-        seg = segs[args.from_segments]
-        return (seg["scene"], seg["ts_start"], seg["ts_end"],
-                f"{seg['scene']}_id{seg['vehicle_id']}_seg{seg['segment_index']:02d}",
-                seg["vehicle_id"])
-
-    if args.scene and args.ts_start and args.ts_end:
-        return (args.scene, args.ts_start, args.ts_end,
-                f"{args.scene}_{args.ts_start}_{args.ts_end}", args.vid)
-
-    if args.scene and args.vid is not None:
-        # 从 filtered_segments.json 里找匹配的 scene/vid/seg
-        sf = INTERSECTION_FILTER_DIR / "filtered_segments.json"
-        if sf.exists():
-            with open(sf, "r") as f:
-                segs = json.load(f)
-            for seg in segs:
-                if (seg["scene"] == args.scene and seg["vehicle_id"] == args.vid
-                        and seg["segment_index"] == args.seg):
-                    return (seg["scene"], seg["ts_start"], seg["ts_end"],
-                            f"{seg['scene']}_id{args.vid}_seg{args.seg:02d}", args.vid)
-        raise ValueError("未找到匹配的片段，请改用 --ts-start/--ts-end 或 --from-segments")
-
-    raise ValueError("请指定 clip：--demo / --from-segments N / --scene+--vid / "
-                     "--scene+--ts-start+--ts-end")
+        return ({"x_min": -50, "x_max": 50, "y_min": -50, "y_max": 50}, "default")
+    cx, cy = float(np.median(xs)), float(np.median(ys))
+    h = args.region_half
+    return ({"x_min": cx - h, "x_max": cx + h,
+             "y_min": cy - h, "y_max": cy + h}, "auto(median)")
 
 
 # ==================================================================
-# 合成演示数据
+# 合成演示数据（一整段录制：车辆陆续进入路口）
 # ==================================================================
 def make_demo(seed=7):
-    """生成一个四岔路口、若干车辆（含直行/左转/右转）的合成 clip。"""
     rng = np.random.default_rng(seed)
-    n_frames = SEGMENT_LENGTH
-    dt = 0.1  # 10 Hz
-    t = np.arange(n_frames) * dt
-    region = {"x_min": -40, "x_max": 40, "y_min": -40, "y_max": 40}
+    region = {"x_min": -45, "x_max": 45, "y_min": -45, "y_max": 45}
+    dt_ms = 400               # 标注帧间隔
+    total_s = 60.0
+    n_frames = int(total_s * 1000 / dt_ms)
+    base_ts = 1742877424148
+    frame_ts = [base_ts + i * dt_ms for i in range(n_frames)]
 
     tracks = {}
-    vid = 0
+    vid = 100
 
-    def add(path_xy, yaws, label="Car", start_frame=0):
+    def spawn(kind, lane, speed, enter_frame):
         nonlocal vid
-        frames = []
-        for k, (x, y) in enumerate(path_xy):
-            fi = start_frame + k
-            if fi >= n_frames:
+        fr = []
+        for k in range(n_frames - enter_frame):
+            fi = enter_frame + k
+            t = k * dt_ms / 1000.0
+            if kind == "W2E":
+                x, y, yaw = -45 + speed * t, lane, 0.0
+            elif kind == "E2W":
+                x, y, yaw = 45 - speed * t, lane, math.pi
+            elif kind == "N2S":
+                x, y, yaw = lane, 45 - speed * t, -math.pi / 2
+            elif kind == "S2N":
+                x, y, yaw = lane, -45 + speed * t, math.pi / 2
+            elif kind == "LEFT":     # 南进 -> 东出 左转：先 1/4 圆弧，再沿东直行
+                R, cx0, cy0 = 12.0, 12.0 - 3.5, -12.0
+                if t <= 2.0:
+                    ang = -math.pi / 2 + (math.pi / 2) * (t / 2.0)
+                    x, y, yaw = cx0 + R * math.cos(ang), cy0 + R * math.sin(ang), ang + math.pi / 2
+                else:
+                    x, y, yaw = cx0 + R + speed * (t - 2.0), cy0, 0.0
+            else:
+                return
+            if abs(x) > 60 or abs(y) > 60:
                 break
-            frames.append({"ts": int(1000 * t[fi]), "x": float(x), "y": float(y),
-                           "yaw": float(yaws[k]), "label": label})
-        if len(frames) >= 5:
-            tracks[vid] = frames
+            fr.append({"ts": frame_ts[fi], "x": float(x), "y": float(y),
+                       "yaw": float(yaw), "label": kind_label(kind, rng)})
+        if len(fr) >= 4:
+            tracks[vid] = fr
             vid += 1
 
-    # 直行车（4 个方向各几辆，速度/相位不同；速度足够穿过路口中心以产生交叉）
-    for lane, base in [("W2E", -3.5), ("W2E", -7.0)]:
-        speed = rng.uniform(20, 26)
-        sf = int(rng.integers(0, 5))
-        xs = -38 + speed * t
-        ys = np.full_like(xs, base)
-        add(list(zip(xs, ys)), np.zeros(n_frames), start_frame=sf)
-    for lane, base in [("E2W", 3.5), ("E2W", 7.0)]:
-        speed = rng.uniform(20, 26)
-        sf = int(rng.integers(0, 5))
-        xs = 38 - speed * t
-        ys = np.full_like(xs, base)
-        add(list(zip(xs, ys)), np.full(n_frames, math.pi), start_frame=sf)
-    for base in [3.5, 7.0]:
-        speed = rng.uniform(18, 24)
-        sf = int(rng.integers(0, 6))
-        ys = -38 + speed * t
-        xs = np.full_like(ys, base)
-        add(list(zip(xs, ys)), np.full(n_frames, math.pi / 2), label="Suv", start_frame=sf)
-    for base in [-3.5, -7.0]:
-        speed = rng.uniform(18, 24)
-        sf = int(rng.integers(0, 6))
-        ys = 38 - speed * t
-        xs = np.full_like(ys, base)
-        add(list(zip(xs, ys)), np.full(n_frames, -math.pi / 2), label="Truck", start_frame=sf)
+    def kind_label(kind, rng):
+        return rng.choice(["Car", "Car", "Suv", "Truck", "Van"])
 
-    # 左转车（南进 -> 东出，沿 1/4 圆弧）
-    R = 12.0
-    cx, cy = R - 3.5, -R
-    ang = np.linspace(-math.pi / 2, 0, n_frames) + 0.0
-    xs = cx + R * np.cos(ang)
-    ys = cy + R * np.sin(ang)
-    yaws = ang + math.pi / 2
-    add(list(zip(xs, ys)), yaws, label="Car", start_frame=2)
+    # 四个方向陆续放车
+    for ef in range(0, n_frames - 8, 9):
+        spawn("W2E", rng.choice([-3.5, -7.0]), rng.uniform(16, 24), ef)
+    for ef in range(4, n_frames - 8, 10):
+        spawn("E2W", rng.choice([3.5, 7.0]), rng.uniform(16, 24), ef)
+    for ef in range(2, n_frames - 8, 11):
+        spawn("N2S", rng.choice([3.5, 7.0]), rng.uniform(14, 22), ef)
+    for ef in range(6, n_frames - 8, 12):
+        spawn("S2N", rng.choice([-3.5, -7.0]), rng.uniform(14, 22), ef)
+    for ef in range(8, n_frames - 8, 18):
+        spawn("LEFT", 0, rng.uniform(10, 14), ef)
 
-    # 右转车（西进 -> 南出）
-    R2 = 7.0
-    cx2, cy2 = -R2, R2 - 7.0
-    ang2 = np.linspace(0, -math.pi / 2, n_frames)
-    xs2 = cx2 + R2 * np.cos(ang2)
-    ys2 = cy2 + R2 * np.sin(ang2)
-    yaws2 = ang2 - math.pi / 2
-    add(list(zip(xs2, ys2)), yaws2, label="Van", start_frame=4)
-
-    # 一辆缓慢通过、轻微抖动的车（增加交互）
-    speed = 5.0
-    xs = -20 + speed * t
-    ys = 0.5 * np.sin(t * 2.0) - 3.5
-    yaws = np.gradient(ys, xs)
-    add(list(zip(xs, ys)), np.arctan(yaws), label="Bus", start_frame=0)
-
-    frame_ts = sorted({int(1000 * x) for x in t})
-    return "DEMO_intersection", tracks, frame_ts, region, None
+    return "DEMO_intersection", tracks, frame_ts, region
 
 
 # ==================================================================
 # 复杂度指标
 # ==================================================================
 def _seg_intersect(p1, p2, p3, p4):
-    """判断线段 p1p2 与 p3p4 是否相交，返回交点或 None。"""
     x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
     d = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
     if abs(d) < 1e-9:
@@ -307,31 +259,16 @@ def _seg_intersect(p1, p2, p3, p4):
     return None
 
 
-def find_crossings(tracks):
-    """找出不同车辆轨迹之间的空间交叉点（潜在冲突点）。"""
-    polylines = {vid: [(r["x"], r["y"]) for r in fr] for vid, fr in tracks.items()}
-    vids = list(polylines.keys())
-    crossings = []
-    for i in range(len(vids)):
-        for j in range(i + 1, len(vids)):
-            a = polylines[vids[i]]
-            b = polylines[vids[j]]
-            found = None
-            for k in range(len(a) - 1):
-                for m in range(len(b) - 1):
-                    pt = _seg_intersect(a[k], a[k + 1], b[m], b[m + 1])
-                    if pt is not None:
-                        found = pt
-                        break
-                if found:
-                    break
-            if found:
-                crossings.append(found)
-    return crossings
+def _ang_diff(a, b):
+    d = a - b
+    while d > math.pi:
+        d -= 2 * math.pi
+    while d < -math.pi:
+        d += 2 * math.pi
+    return d
 
 
 def net_heading(frames):
-    """整段轨迹的净行驶方向（弧度）。"""
     if len(frames) < 2:
         return None
     dx = frames[-1]["x"] - frames[0]["x"]
@@ -342,60 +279,88 @@ def net_heading(frames):
 
 
 def turning_amount(frames):
-    """整段累计航向变化（度），用 yaw 或位移方向估计。"""
     yaws = [r["yaw"] for r in frames if r["yaw"] is not None]
-    if len(yaws) < 2:
-        h0 = net_heading(frames[:max(2, len(frames) // 2)])
-        h1 = net_heading(frames[max(2, len(frames) // 2):])
-        if h0 is None or h1 is None:
-            return 0.0
-        return abs(math.degrees(_ang_diff(h1, h0)))
-    total = 0.0
-    for a, b in zip(yaws[:-1], yaws[1:]):
-        total += abs(math.degrees(_ang_diff(b, a)))
-    return total
+    if len(yaws) >= 2:
+        return sum(abs(math.degrees(_ang_diff(b, a)))
+                   for a, b in zip(yaws[:-1], yaws[1:]))
+    h0 = net_heading(frames[:max(2, len(frames) // 2)])
+    h1 = net_heading(frames[max(2, len(frames) // 2):])
+    if h0 is None or h1 is None:
+        return 0.0
+    return abs(math.degrees(_ang_diff(h1, h0)))
 
 
-def _ang_diff(a, b):
-    d = a - b
-    while d > math.pi:
-        d -= 2 * math.pi
-    while d < -math.pi:
-        d += 2 * math.pi
-    return d
+def find_crossings(passing_polylines):
+    """路口内轨迹两两空间交叉点（potential conflicts）。输入为已裁剪到路口的折线。"""
+    vids = list(passing_polylines.keys())
+    crossings = []
+    for i in range(len(vids)):
+        a = passing_polylines[vids[i]]
+        if len(a) < 2:
+            continue
+        for j in range(i + 1, len(vids)):
+            b = passing_polylines[vids[j]]
+            if len(b) < 2:
+                continue
+            hit = None
+            for k in range(len(a) - 1):
+                for m in range(len(b) - 1):
+                    pt = _seg_intersect(a[k], a[k + 1], b[m], b[m + 1])
+                    if pt is not None:
+                        hit = pt
+                        break
+                if hit:
+                    break
+            if hit:
+                crossings.append(hit)
+    return crossings
 
 
-def compute_metrics(tracks, frame_ts):
-    n_agents = len(tracks)
+def compute_metrics(tracks, frame_ts, region):
+    # 通过路口的车辆 = 轨迹至少有一点落在路口区域
+    passing = {}
+    region_poly = {}
+    for vid, fr in tracks.items():
+        in_pts = [(r["x"], r["y"]) for r in fr if _in_region(r["x"], r["y"], region)]
+        if in_pts:
+            passing[vid] = fr
+            region_poly[vid] = in_pts
+    n_pass = len(passing)
 
-    # 每帧在场车辆数 & 交互对数（中心距 < THRESH）
-    THRESH = 12.0
-    per_frame_counts = []
-    per_frame_interactions = []
+    # 每帧路口内车辆数 + 交互对数
     pos_by_ts = defaultdict(list)
-    for fr in tracks.values():
+    for fr in passing.values():
         for r in fr:
-            pos_by_ts[r["ts"]].append((r["x"], r["y"]))
+            if _in_region(r["x"], r["y"], region):
+                pos_by_ts[r["ts"]].append((r["x"], r["y"]))
+    per_frame_counts, per_frame_inter = [], []
     for ts in frame_ts:
         pts = pos_by_ts.get(ts, [])
         per_frame_counts.append(len(pts))
-        inter = 0
-        for i in range(len(pts)):
-            for j in range(i + 1, len(pts)):
-                if math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < THRESH:
-                    inter += 1
-        per_frame_interactions.append(inter)
-
+        inter = sum(1 for i in range(len(pts)) for j in range(i + 1, len(pts))
+                    if math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < INTERACT_DIST)
+        per_frame_inter.append(inter)
     peak = max(per_frame_counts) if per_frame_counts else 0
     mean_conc = float(np.mean(per_frame_counts)) if per_frame_counts else 0.0
 
-    # 方向熵（8 个罗盘扇区）
-    headings = [net_heading(fr) for fr in tracks.values()]
-    headings = [h for h in headings if h is not None]
+    # 累计通过数（按首次进入路口时间）
+    entry_ts = {}
+    for vid, pts in region_poly.items():
+        for r in passing[vid]:
+            if _in_region(r["x"], r["y"], region):
+                entry_ts[vid] = r["ts"]
+                break
+    cumulative = [sum(1 for t in entry_ts.values() if t <= ts) for ts in frame_ts]
+
+    # 时长 & 吞吐量
+    duration = (frame_ts[-1] - frame_ts[0]) / 1000.0 if len(frame_ts) >= 2 else 0.0
+    throughput = n_pass / (duration / 60.0) if duration > 0 else 0.0
+
+    # 方向熵（8 扇区）
+    headings = [h for h in (net_heading(fr) for fr in passing.values()) if h is not None]
     bins = np.zeros(8)
     for h in headings:
-        idx = int(((math.degrees(h) % 360) + 22.5) // 45) % 8
-        bins[idx] += 1
+        bins[int(((math.degrees(h) % 360) + 22.5) // 45) % 8] += 1
     if bins.sum() > 0:
         p = bins / bins.sum()
         nz = p[p > 0]
@@ -403,50 +368,39 @@ def compute_metrics(tracks, frame_ts):
     else:
         dir_entropy = 0.0
 
-    # 转向比例（累计航向变化 > 30°）
-    turners = sum(1 for fr in tracks.values() if turning_amount(fr) > 30.0)
-    turn_ratio = turners / n_agents if n_agents else 0.0
+    # 转向比例
+    turners = sum(1 for fr in passing.values() if turning_amount(fr) > 30.0)
+    turn_ratio = turners / n_pass if n_pass else 0.0
 
-    # 路径长度 & 速度
+    # 平均车速
     speeds = []
-    for fr in tracks.values():
+    for fr in passing.values():
         for a, b in zip(fr[:-1], fr[1:]):
             dt = (b["ts"] - a["ts"]) / 1000.0
             if dt > 1e-3:
                 speeds.append(math.hypot(b["x"] - a["x"], b["y"] - a["y"]) / dt)
-    mean_speed = float(np.mean(speeds)) if speeds else 0.0
+    mean_speed = float(np.median(speeds)) if speeds else 0.0
 
-    crossings = find_crossings(tracks)
+    crossings = find_crossings(region_poly)
     n_cross = len(crossings)
 
     # 综合复杂度评分（0~100，启发式加权）
-    dens = min(mean_conc / 8.0, 1.0)
-    crossn = min(n_cross / max(n_agents, 1), 1.0)
-    score = 100.0 * (0.30 * dens + 0.25 * dir_entropy +
-                     0.25 * crossn + 0.15 * turn_ratio +
-                     0.05 * min(n_agents / 15.0, 1.0))
-    if score >= 70:
-        level = "High"
-    elif score >= 45:
-        level = "Medium"
-    else:
-        level = "Low"
+    dens = min(mean_conc / 5.0, 1.0)
+    crossn = min(n_cross / max(n_pass, 1), 1.0)
+    thru = min(throughput / 30.0, 1.0)
+    score = 100.0 * (0.25 * dens + 0.20 * dir_entropy + 0.25 * crossn +
+                     0.10 * turn_ratio + 0.20 * thru)
+    level = "High" if score >= 65 else ("Medium" if score >= 40 else "Low")
 
     return {
-        "n_agents": n_agents,
-        "n_frames": len(frame_ts),
-        "peak_concurrent": peak,
-        "mean_concurrent": mean_conc,
-        "dir_entropy": dir_entropy,
-        "turn_ratio": turn_ratio,
-        "n_turners": turners,
-        "n_crossings": n_cross,
-        "crossings": crossings,
-        "mean_speed": mean_speed,
-        "per_frame_counts": per_frame_counts,
-        "per_frame_interactions": per_frame_interactions,
-        "score": score,
-        "level": level,
+        "passing": passing, "region_poly": region_poly,
+        "n_pass": n_pass, "duration": duration, "throughput": throughput,
+        "peak_concurrent": peak, "mean_concurrent": mean_conc,
+        "dir_entropy": dir_entropy, "turn_ratio": turn_ratio, "n_turners": turners,
+        "n_crossings": n_cross, "crossings": crossings, "mean_speed": mean_speed,
+        "per_frame_counts": per_frame_counts, "per_frame_interactions": per_frame_inter,
+        "cumulative": cumulative, "frame_ts": frame_ts,
+        "score": score, "level": level,
     }
 
 
@@ -456,11 +410,9 @@ def compute_metrics(tracks, frame_ts):
 def load_pcd_points(pcd_path, max_pts=120000):
     try:
         import open3d as o3d
-        pcd = o3d.io.read_point_cloud(pcd_path)
-        pts = np.asarray(pcd.points)
+        pts = np.asarray(o3d.io.read_point_cloud(pcd_path).points)
     except Exception:
-        pts = []
-        started = False
+        pts, started = [], False
         with open(pcd_path, "r", errors="ignore") as f:
             for line in f:
                 if started:
@@ -479,13 +431,9 @@ def load_pcd_points(pcd_path, max_pts=120000):
     return pts
 
 
-def get_base_pcd(scene_prefix, mid_ts):
-    if get_scene_paths is None:
-        return None
-    paths = get_scene_paths(scene_prefix)
-    if not paths:
-        return None
-    pcd_files = sorted(glob.glob(os.path.join(paths.get("pcd", ""), "*.pcd")))
+def get_base_pcd(clip_dir, mid_ts):
+    pcd_dir = Path(clip_dir) / "road" / "lidar" / "merged_pcd"
+    pcd_files = sorted(glob.glob(os.path.join(str(pcd_dir), "*.pcd")))
     if not pcd_files:
         return None
     best, bd = None, float("inf")
@@ -496,15 +444,20 @@ def get_base_pcd(scene_prefix, mid_ts):
             continue
         if abs(ts - mid_ts) < bd:
             bd, best = abs(ts - mid_ts), pf
-    if best is None:
-        best = pcd_files[len(pcd_files) // 2]
-    return load_pcd_points(best)
+    return load_pcd_points(best or pcd_files[len(pcd_files) // 2])
 
 
 # ==================================================================
 # 绘图
 # ==================================================================
-def draw_figure(scene_name, tracks, frame_ts, region, metrics, tag,
+def _heading_color(h):
+    from matplotlib.colors import hsv_to_rgb
+    if h is None:
+        return (0.5, 0.5, 0.5)
+    return tuple(hsv_to_rgb([(h % (2 * math.pi)) / (2 * math.pi), 0.72, 0.88]))
+
+
+def draw_figure(scene_name, region, region_src, metrics, tag,
                 base_pts=None, demo=False):
     import matplotlib
     matplotlib.use("Agg")
@@ -512,164 +465,148 @@ def draw_figure(scene_name, tracks, frame_ts, region, metrics, tag,
     from matplotlib import gridspec
     from matplotlib.patches import Rectangle, FancyArrow
 
-    plt.rcParams.update({
-        "font.family": "DejaVu Sans",
-        "font.size": 11,
-        "axes.linewidth": 0.8,
-        "mathtext.default": "regular",
-    })
+    plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 11,
+                         "axes.linewidth": 0.8, "mathtext.default": "regular"})
 
-    fig = plt.figure(figsize=(15.5, 8.6))
-    gs = gridspec.GridSpec(3, 3, width_ratios=[2.0, 0.04, 1.0],
-                           height_ratios=[1, 1, 1], wspace=0.18, hspace=0.42)
-    ax = fig.add_subplot(gs[:, 0])          # 主 BEV
-    ax_card = fig.add_subplot(gs[0, 2])     # 指标面板
-    ax_rose = fig.add_subplot(gs[1, 2], projection="polar")  # 方向玫瑰
-    ax_time = fig.add_subplot(gs[2, 2])     # 时序曲线
+    fig = plt.figure(figsize=(15.5, 8.8))
+    gs = gridspec.GridSpec(3, 3, width_ratios=[2.0, 0.05, 1.0],
+                           height_ratios=[1.55, 0.95, 1.0], wspace=0.16, hspace=0.5)
+    ax = fig.add_subplot(gs[:, 0])
+    ax_card = fig.add_subplot(gs[0, 2])
+    ax_rose = fig.add_subplot(gs[1, 2], projection="polar")
+    ax_time = fig.add_subplot(gs[2, 2])
 
-    cx = 0.5 * (region["x_min"] + region["x_max"])
-    cy = 0.5 * (region["y_min"] + region["y_max"])
+    passing = metrics["passing"]
 
-    # --- 底图 ---
+    # 底图
     if base_pts is not None and len(base_pts) > 0:
         ax.scatter(base_pts[:, 0], base_pts[:, 1], s=0.15, c="#c8c8c8",
                    alpha=0.5, rasterized=True, zorder=0)
     elif demo:
-        # 示意四岔路口
-        road_w = 16
-        ax.add_patch(Rectangle((region["x_min"], cy - road_w / 2),
-                               region["x_max"] - region["x_min"], road_w,
-                               color="#ececec", zorder=0))
-        ax.add_patch(Rectangle((cx - road_w / 2, region["y_min"]),
-                               road_w, region["y_max"] - region["y_min"],
-                               color="#ececec", zorder=0))
-        # 车道虚线
-        for yy in (cy,):
-            ax.plot([region["x_min"], region["x_max"]], [yy, yy], "--",
-                    color="#f4c430", lw=1.2, dashes=(6, 6), zorder=0.5, alpha=0.8)
-        for xx in (cx,):
-            ax.plot([xx, xx], [region["y_min"], region["y_max"]], "--",
-                    color="#f4c430", lw=1.2, dashes=(6, 6), zorder=0.5, alpha=0.8)
+        cx = 0.5 * (region["x_min"] + region["x_max"])
+        cy = 0.5 * (region["y_min"] + region["y_max"])
+        rw = 18
+        ax.add_patch(Rectangle((region["x_min"], cy - rw / 2),
+                               region["x_max"] - region["x_min"], rw,
+                               color="#ededed", zorder=0))
+        ax.add_patch(Rectangle((cx - rw / 2, region["y_min"]),
+                               rw, region["y_max"] - region["y_min"],
+                               color="#ededed", zorder=0))
 
-    # --- 路口区域框 ---
+    # 路口区域框
     ax.add_patch(Rectangle((region["x_min"], region["y_min"]),
                            region["x_max"] - region["x_min"],
-                           region["y_max"] - region["y_min"],
-                           fill=False, edgecolor="#d62728", lw=1.8,
-                           linestyle=(0, (6, 4)), zorder=2,
-                           label="Intersection region"))
+                           region["y_max"] - region["y_min"], fill=False,
+                           edgecolor="#d62728", lw=1.8, linestyle=(0, (6, 4)),
+                           zorder=2, label="Intersection region"))
 
-    # --- 轨迹 ---
-    cmap = plt.get_cmap("turbo")
-    vids = list(tracks.keys())
-    n = max(len(vids), 1)
-    for i, vid in enumerate(vids):
-        fr = tracks[vid]
+    # 轨迹（按航向着色）
+    many = len(passing) > 45
+    for vid, fr in passing.items():
         xs = [r["x"] for r in fr]
         ys = [r["y"] for r in fr]
-        col = cmap((i + 0.5) / n)
-        ax.plot(xs, ys, "-", color=col, lw=2.0, alpha=0.9, zorder=4,
-                solid_capstyle="round")
-        ax.scatter(xs[0], ys[0], s=34, color=col, edgecolors="white",
-                   linewidths=0.7, zorder=5)  # 起点
-        # 终点方向箭头
-        if len(xs) >= 2:
+        col = _heading_color(net_heading(fr))
+        ax.plot(xs, ys, "-", color=col, lw=1.3 if many else 1.8,
+                alpha=0.75, zorder=4, solid_capstyle="round")
+        if not many and len(xs) >= 2:
             dx, dy = xs[-1] - xs[-2], ys[-1] - ys[-2]
-            norm = math.hypot(dx, dy) or 1.0
-            ax.add_patch(FancyArrow(xs[-1], ys[-1], dx / norm * 2.2, dy / norm * 2.2,
-                                    width=0.5, head_width=2.2, head_length=2.4,
+            nrm = math.hypot(dx, dy) or 1.0
+            ax.add_patch(FancyArrow(xs[-1], ys[-1], dx / nrm * 2.0, dy / nrm * 2.0,
+                                    width=0.4, head_width=2.0, head_length=2.2,
                                     length_includes_head=True, color=col, zorder=6))
 
-    # --- 冲突点 ---
+    # 冲突点
     for (px, py) in metrics["crossings"]:
-        ax.scatter(px, py, marker="x", s=70, c="#111111", linewidths=2.0, zorder=7)
+        ax.scatter(px, py, marker="x", s=55, c="#111111", linewidths=1.6, zorder=7)
     if metrics["crossings"]:
-        ax.scatter([], [], marker="x", c="#111111", linewidths=2.0,
-                   label=f"Trajectory conflict (×{metrics['n_crossings']})")
+        ax.scatter([], [], marker="x", c="#111111", linewidths=1.6,
+                   label=f"Conflict point (×{metrics['n_crossings']})")
+    ax.plot([], [], "-", color="0.4", label="Track (hue = heading)")
 
-    ax.scatter([], [], marker="o", c="gray", edgecolors="white",
-               label="Track start")
+    ext = max(region["x_max"] - region["x_min"], region["y_max"] - region["y_min"]) * 0.32
+    ext = max(ext, 12)
+    ax.set_xlim(region["x_min"] - ext, region["x_max"] + ext)
+    ax.set_ylim(region["y_min"] - ext, region["y_max"] + ext)
     ax.set_aspect("equal")
-    ax.set_xlim(region["x_min"], region["x_max"])
-    ax.set_ylim(region["y_min"], region["y_max"])
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title(f"(a) BEV traffic flow  —  clip {tag}", fontsize=12, loc="left",
-                 fontweight="bold")
-    ax.grid(True, alpha=0.25, lw=0.5)
-    ax.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+    ax.set_title(f"(a) BEV traffic flow through intersection  —  clip {tag}",
+                 fontsize=12, loc="left", fontweight="bold")
+    ax.grid(True, alpha=0.22, lw=0.5)
+    ax.legend(loc="upper right", fontsize=8.5, framealpha=0.92)
 
-    # --- 指标面板 ---
+    # 指标面板
     ax_card.axis("off")
+    ax_card.set_xlim(0, 1)
+    ax_card.set_ylim(0, 1)
     ax_card.set_title("(b) Complexity metrics", fontsize=12, loc="left",
                       fontweight="bold")
-    level_color = {"High": "#d62728", "Medium": "#ff7f0e", "Low": "#2ca02c"}[
-        metrics["level"]]
+    lvl_color = {"High": "#d62728", "Medium": "#ff7f0e", "Low": "#2ca02c"}[metrics["level"]]
     rows = [
-        ("Agents in clip", f"{metrics['n_agents']}"),
-        ("Frames", f"{metrics['n_frames']}"),
+        ("Recording length", f"{metrics['duration']:.0f} s"),
+        ("Label frames", f"{len(metrics['frame_ts'])}"),
+        ("Vehicles through int.", f"{metrics['n_pass']}"),
+        ("Throughput", f"{metrics['throughput']:.1f} veh/min"),
         ("Peak concurrent", f"{metrics['peak_concurrent']}"),
         ("Mean concurrent", f"{metrics['mean_concurrent']:.1f}"),
         ("Direction entropy", f"{metrics['dir_entropy']:.2f}"),
-        ("Turning agents", f"{metrics['n_turners']} ({metrics['turn_ratio']*100:.0f}%)"),
+        ("Turning vehicles", f"{metrics['n_turners']} ({metrics['turn_ratio']*100:.0f}%)"),
         ("Conflict points", f"{metrics['n_crossings']}"),
-        ("Mean speed", f"{metrics['mean_speed']:.1f} m/s"),
+        ("Median speed", f"{metrics['mean_speed']:.1f} m/s"),
     ]
-    y = 0.95
+    y, step = 0.95, 0.9 / (len(rows) + 1.6)
     for k, v in rows:
-        ax_card.text(0.02, y, k, fontsize=10, va="center")
-        ax_card.text(0.98, y, v, fontsize=10, va="center", ha="right",
-                     fontweight="bold")
-        y -= 0.092
-    # 评分条
-    bar_y = y - 0.07
-    ax_card.text(0.02, y, "Complexity score", fontsize=10.5,
-                 va="center", fontweight="bold")
+        ax_card.text(0.02, y, k, fontsize=9.5, va="center")
+        ax_card.text(0.98, y, v, fontsize=9.5, va="center", ha="right", fontweight="bold")
+        y -= step
+    ax_card.text(0.02, y, "Complexity score", fontsize=10.5, va="center", fontweight="bold")
     ax_card.text(0.98, y, f"{metrics['score']:.0f}/100  ({metrics['level']})",
-                 fontsize=10.5, va="center", ha="right", fontweight="bold",
-                 color=level_color)
-    ax_card.add_patch(plt.Rectangle((0.02, bar_y - 0.04), 0.96, 0.055,
-                                    color="#e8e8e8"))
-    ax_card.add_patch(plt.Rectangle((0.02, bar_y - 0.04),
-                                    0.96 * metrics["score"] / 100.0, 0.055,
-                                    color=level_color))
-    ax_card.set_xlim(0, 1)
-    ax_card.set_ylim(0, 1)
+                 fontsize=10.5, va="center", ha="right", fontweight="bold", color=lvl_color)
+    by = y - 0.06
+    ax_card.add_patch(plt.Rectangle((0.02, by - 0.035), 0.96, 0.05, color="#e8e8e8"))
+    ax_card.add_patch(plt.Rectangle((0.02, by - 0.035), 0.96 * metrics["score"] / 100.0,
+                                    0.05, color=lvl_color))
 
-    # --- 方向玫瑰 ---
+    # 方向玫瑰
     ax_rose.set_title("(c) Heading distribution", fontsize=11, loc="left",
-                      fontweight="bold", pad=12)
-    headings = [net_heading(fr) for fr in tracks.values()]
-    headings = [h for h in headings if h is not None]
-    nb = 8
+                      fontweight="bold", pad=10)
+    from matplotlib.colors import hsv_to_rgb
+    headings = [h for h in (net_heading(fr) for fr in passing.values()) if h is not None]
+    nb = 12
     edges = np.linspace(-math.pi, math.pi, nb + 1)
     counts, _ = np.histogram(headings, bins=edges)
     centers = (edges[:-1] + edges[1:]) / 2
-    ax_rose.bar(centers, counts, width=2 * math.pi / nb, bottom=0.0,
-                color=cmap(np.linspace(0.15, 0.9, nb)), edgecolor="white",
-                alpha=0.9, align="center")
+    colors = [hsv_to_rgb([(c % (2 * math.pi)) / (2 * math.pi), 0.72, 0.88]) for c in centers]
+    ax_rose.bar(centers, counts, width=2 * math.pi / nb, color=colors,
+                edgecolor="white", alpha=0.95, align="center")
     ax_rose.set_theta_zero_location("E")
     ax_rose.set_theta_direction(1)
     ax_rose.set_yticklabels([])
     ax_rose.set_xticks(np.linspace(0, 2 * math.pi, 4, endpoint=False))
     ax_rose.set_xticklabels(["E", "N", "W", "S"], fontsize=9)
-    ax_rose.tick_params(pad=-2)
 
-    # --- 时序曲线 ---
-    ax_time.set_title("(d) Temporal density", fontsize=11, loc="left",
-                      fontweight="bold")
-    f = np.arange(metrics["n_frames"])
-    ax_time.plot(f, metrics["per_frame_counts"], "-o", ms=3, lw=1.6,
-                 color="#1f77b4", label="Vehicles in scene")
-    ax_time.plot(f, metrics["per_frame_interactions"], "-s", ms=3, lw=1.6,
-                 color="#d62728", label="Interaction pairs")
-    ax_time.set_xlabel("Frame index")
-    ax_time.set_ylabel("Count")
+    # 时序密度
+    ax_time.set_title("(d) Temporal density", fontsize=11, loc="left", fontweight="bold")
+    t0 = metrics["frame_ts"][0]
+    tsec = [(ts - t0) / 1000.0 for ts in metrics["frame_ts"]]
+    ax_time.plot(tsec, metrics["per_frame_counts"], "-", lw=1.6, color="#1f77b4",
+                 label="In intersection")
+    ax_time.set_xlabel("Time (s)")
+    ax_time.set_ylabel("Vehicles", color="#1f77b4")
+    ax_time.tick_params(axis="y", labelcolor="#1f77b4")
     ax_time.grid(True, alpha=0.3, lw=0.5)
-    ax_time.legend(fontsize=8, loc="upper left")
+    ax2 = ax_time.twinx()
+    ax2.plot(tsec, metrics["cumulative"], "-", lw=1.8, color="#d62728",
+             label="Cumulative passed")
+    ax2.set_ylabel("Cumulative", color="#d62728")
+    ax2.tick_params(axis="y", labelcolor="#d62728")
+    l1, lb1 = ax_time.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    ax_time.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="upper left")
 
-    src = "synthetic demo data" if demo else f"scene {scene_name}"
-    fig.suptitle(f"Traffic-flow complexity of a single clip  ({src})",
+    src = "synthetic demo" if demo else f"scene {scene_name}"
+    fig.suptitle(f"Traffic-flow complexity of clip {tag}   "
+                 f"({src};  region: {region_src})",
                  fontsize=14, fontweight="bold", y=0.995)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -685,46 +622,65 @@ def draw_figure(scene_name, tracks, frame_ts, region, metrics, tag,
 # 主流程
 # ==================================================================
 def main():
-    ap = argparse.ArgumentParser(description="单 clip 交通流复杂度论文图")
-    ap.add_argument("--demo", action="store_true", help="用合成数据演示（无需真实数据集）")
-    ap.add_argument("--from-segments", type=int, default=None,
-                    help="从 intersection_filter/output/filtered_segments.json 取第 N 个片段")
-    ap.add_argument("--scene", type=str, default=None, help="场景前缀，如 002")
-    ap.add_argument("--vid", type=int, default=None, help="（可选）clip 对应的参考车辆 id")
-    ap.add_argument("--seg", type=int, default=0, help="片段序号（配合 --scene/--vid）")
-    ap.add_argument("--ts-start", type=int, default=None, help="时间窗口起（毫秒）")
-    ap.add_argument("--ts-end", type=int, default=None, help="时间窗口止（毫秒）")
-    ap.add_argument("--no-region-clip", action="store_true",
-                    help="不限制在路口矩形内（统计窗口内所有车辆）")
+    ap = argparse.ArgumentParser(description="单 clip 交通流复杂度论文图（全时序/路口吞吐）")
+    ap.add_argument("--demo", action="store_true", help="合成数据演示，无需真实数据集")
+    ap.add_argument("--clip-dir", type=str, default=None,
+                    help="clip 目录绝对路径，如 /mnt/car_road_data_TianJin/002_car0325_road0327_t2")
+    ap.add_argument("--dataset-root", type=str, default=_DEFAULT_ROOT,
+                    help="数据集根目录（配合 --clip 名使用）")
+    ap.add_argument("--clip", type=str, default=None,
+                    help="clip 目录名或前缀（配合 --dataset-root），如 002 或完整名")
+    ap.add_argument("--labels-subdir", type=str, default=None,
+                    help="覆盖标注子目录（默认 road_labels/interpolation_labels）")
+    ap.add_argument("--ts-start", type=int, default=None, help="时间窗起（毫秒，可选）")
+    ap.add_argument("--ts-end", type=int, default=None, help="时间窗止（毫秒，可选）")
+    ap.add_argument("--region", type=float, nargs=4, default=None,
+                    metavar=("XMIN", "XMAX", "YMIN", "YMAX"), help="手动指定路口矩形")
+    ap.add_argument("--region-json", type=str, default=None,
+                    help="路口区域 json（默认读 intersection_filter/output/intersection_region.json）")
+    ap.add_argument("--region-half", type=float, default=50.0,
+                    help="自动估计路口区域时的半边长（米，默认50）")
     ap.add_argument("--no-pcd", action="store_true", help="不加载点云底图")
     args = ap.parse_args()
 
     if args.demo:
-        scene_name, tracks, frame_ts, region, ego_vid = make_demo()
-        base_pts = None
-        demo = True
-        tag = "demo"
+        scene_name, tracks, frame_ts, region = make_demo()
+        region_src, base_pts, demo, tag = "demo-fixed", None, True, "demo"
     else:
-        scene, ts_start, ts_end, tag, ego_vid = resolve_clip(args)
-        region = None if args.no_region_clip else load_region()
-        tracks, frame_ts = collect_tracks(scene, ts_start, ts_end, region=region)
+        # 解析 clip 目录
+        clip_dir = args.clip_dir
+        if clip_dir is None:
+            if args.clip is None:
+                ap.error("请指定 --clip-dir <目录> 或 --dataset-root + --clip <名>，或 --demo")
+            matches = sorted(glob.glob(os.path.join(args.dataset_root, args.clip + "*")))
+            if not matches:
+                ap.error(f"在 {args.dataset_root} 下找不到匹配 {args.clip}* 的 clip 目录")
+            clip_dir = matches[0]
+            if len(matches) > 1:
+                print(f"[WARN] 匹配到多个，使用: {clip_dir}")
+        clip_dir = os.path.abspath(clip_dir)
+        print(f"[INFO] clip 目录: {clip_dir}")
+        label_dir = find_label_dir(clip_dir, args.labels_subdir)
+        print(f"[INFO] 标注目录: {label_dir}")
+        tracks, frame_ts = read_all_labels(label_dir, args.ts_start, args.ts_end)
         if not tracks:
-            print("[ERROR] 窗口内没有车辆轨迹"); sys.exit(1)
-        if region is None:
-            region = region_from_tracks(tracks)
-        scene_name = scene
-        mid_ts = (ts_start + ts_end) // 2
-        base_pts = None if args.no_pcd else get_base_pcd(scene, mid_ts)
+            print("[ERROR] 未读到任何车辆轨迹"); sys.exit(1)
+        region, region_src = resolve_region(args, tracks)
+        scene_name = os.path.basename(clip_dir)
+        tag = scene_name
+        mid_ts = (frame_ts[0] + frame_ts[-1]) // 2
+        base_pts = None if args.no_pcd else get_base_pcd(clip_dir, mid_ts)
         demo = False
 
-    metrics = compute_metrics(tracks, frame_ts)
-    print("\n=== Clip complexity ===")
-    for k in ("n_agents", "n_frames", "peak_concurrent", "mean_concurrent",
-              "dir_entropy", "turn_ratio", "n_crossings", "mean_speed",
-              "score", "level"):
+    metrics = compute_metrics(tracks, frame_ts, region)
+    print("\n=== Clip traffic-flow complexity ===")
+    print(f"  region              : x[{region['x_min']:.1f},{region['x_max']:.1f}] "
+          f"y[{region['y_min']:.1f},{region['y_max']:.1f}]  ({region_src})")
+    for k in ("n_pass", "duration", "throughput", "peak_concurrent", "mean_concurrent",
+              "dir_entropy", "turn_ratio", "n_crossings", "mean_speed", "score", "level"):
         print(f"  {k:18s}: {metrics[k]}")
 
-    png, pdf = draw_figure(scene_name, tracks, frame_ts, region, metrics, tag,
+    png, pdf = draw_figure(scene_name, region, region_src, metrics, tag,
                            base_pts=base_pts, demo=demo)
     print(f"\n[OK] 图已保存:\n  {png}\n  {pdf}")
 
