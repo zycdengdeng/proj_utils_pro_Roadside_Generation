@@ -124,3 +124,34 @@ python traffic_complexity_figure.py --overlay-clips 010 051 \
 建议优先用 `--region` 或 `--region-json` 给定真实路口范围，使"通过路口计数"准确。
 
 输出：`paper_figures/output/traffic_complexity_<clip名>.png`（300 dpi）+ 同名 `.pdf`（矢量，投稿用）。
+
+---
+
+# 论文图 2：车路协同 BEV 对齐
+
+`cross_platform_bev.py` —— 把**路侧 merged 点云 + 路侧 3D 标注 + 变换到路侧坐标系的车端点云**
+叠加到同一张 BEV，展示车路两端的时空对齐（协同数据集卖点图）。
+
+数据来源（`<clip>/`）：`road/lidar/merged_pcd/`、`road_labels/interpolation_labels/`、
+`car/pcds/main/`，自车 id 来自 `support_info/carid.json`。
+
+坐标变换（与 `segment_pipeline/ego_transform.py` 一致）：自车在路侧标注里有 3D 框
+`(x,y,z,roll,pitch,yaw)`，车端 LiDAR 点 → 路侧：
+
+```
+p_road = euler2rotmat(roll,pitch,yaw) @ (p_carlidar + [0,0,h/2+0.25]) + [x,y,z]
+```
+
+帧选取：默认用 `carid.json` 的 `visualize_roadtime` 作路侧帧，再在 `car/pcds/main` 找最近时间戳。
+
+用法：
+
+```bash
+python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJin
+# 默认范围 x[-110,25] y[-50,25]；点云较大建议装 open3d（二进制 PCD 必需）
+```
+
+常用开关：`--road-time <ms>` 指定路侧帧；`--xlim/--ylim` 改范围；`--car-yaw-offset <deg>`
+纠正车端 LiDAR 安装朝向（若车端点云整体转了角度）；`--lidar-z-extra` 调高度偏移；`--max-points` 抽稀。
+
+输出：`paper_figures/output/cross_platform_bev_<clip>.png` / `.pdf`。
