@@ -534,10 +534,12 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
 
     _setup_serif_font(plt)
 
-    fig = plt.figure(figsize=(13.5, 7.4))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.95, 1.0], wspace=0.04)
-    ax = fig.add_subplot(gs[0, 0])
+    fig = plt.figure(figsize=(13.5, 7.9))
+    gs = gridspec.GridSpec(2, 2, width_ratios=[1.9, 1.0],
+                           height_ratios=[1.62, 1.0], wspace=0.06, hspace=0.4)
+    ax = fig.add_subplot(gs[:, 0])
     ax_card = fig.add_subplot(gs[0, 1])
+    ax_time = fig.add_subplot(gs[1, 1])
 
     passing = metrics["passing"]
 
@@ -634,6 +636,26 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
                                      mutation_aspect=0.5, zorder=3))
     ax_card.text(0.50, 0.088, metrics["level"].upper(), fontsize=21, va="center",
                  ha="center", color="white", fontweight="bold", zorder=4)
+
+    # 时序密度：瞬时在场数（左轴）+ 累计通过数（右轴）
+    ax_time.set_title("(c) Temporal density", fontsize=13, loc="left",
+                      fontweight="bold")
+    t0 = metrics["frame_ts"][0]
+    tsec = [(ts - t0) / 1000.0 for ts in metrics["frame_ts"]]
+    ax_time.plot(tsec, metrics["per_frame_counts"], "-", lw=1.7, color="#1f77b4",
+                 label="In region")
+    ax_time.set_xlabel("Time (s)")
+    ax_time.set_ylabel("Vehicles", color="#1f77b4")
+    ax_time.tick_params(axis="y", labelcolor="#1f77b4")
+    ax_time.grid(True, alpha=0.3, lw=0.5)
+    ax2 = ax_time.twinx()
+    ax2.plot(tsec, metrics["cumulative"], "-", lw=1.9, color="#d62728",
+             label="Cumulative passed")
+    ax2.set_ylabel("Cumulative", color="#d62728")
+    ax2.tick_params(axis="y", labelcolor="#d62728")
+    l1, lb1 = ax_time.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    ax_time.legend(l1 + l2, lb1 + lb2, fontsize=9, loc="upper left", framealpha=0.9)
 
     fig.suptitle(FIGURE_TITLE, fontsize=16, fontweight="bold", y=0.99)
 
