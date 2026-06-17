@@ -426,6 +426,7 @@ def _render(clip_name, road_pts, car_pts, labels, ego, args,
 
     swap = args.swap_xy
     sc = args.point_scale
+    clean = getattr(args, "points_only", False)
     xlim, ylim = tuple(args.xlim), tuple(args.ylim)  # 始终是世界坐标
 
     def _crop(p):
@@ -456,7 +457,7 @@ def _render(clip_name, road_pts, car_pts, labels, ego, args,
     def _poly_disp(corners):
         return [P(px, py) for px, py in corners]
 
-    if show_annot:
+    if show_annot and not clean:
         for o in labels:
             if o.get("id") == ego.get("id"):
                 continue
@@ -464,37 +465,42 @@ def _render(clip_name, road_pts, car_pts, labels, ego, args,
                                  fill=False, edgecolor="#111111", lw=1.2, zorder=5))
         ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
 
-    # 自车框：绿色半透明填充 + 粗边 + 朝向箭头 + 标注，画在最上层
-    ax.add_patch(Polygon(_poly_disp(box_corners_bev(ego)), closed=True,
-                         facecolor="#00d050", alpha=0.45, edgecolor="#007a30",
-                         lw=2.8, zorder=10))
-    exw, eyw = ego["x"], ego["y"]
-    epx, epy = P(exw, eyw)
-    yaw = ego.get("yaw", 0.0)
-    al = max(ego.get("length", 4.0), 4.0)
-    adx, ady = P(exw + al * math.cos(yaw), eyw + al * math.sin(yaw))
-    ax.add_patch(FancyArrow(epx, epy, adx - epx, ady - epy, width=0.5,
-                            head_width=3.0, head_length=3.0, length_includes_head=True,
-                            color="#007a30", zorder=11))
-    ax.annotate("Ego", (epx, epy), textcoords="offset points", xytext=(6, 6),
-                fontsize=12, fontweight="bold", color="#007a30", zorder=12)
-    ax.plot([], [], "-", color="#00b050", lw=2.8, label="Ego vehicle")
+    # 自车框：绿色半透明填充 + 粗边 + 朝向箭头 + 标注（points-only 时不画）
+    if not clean:
+        ax.add_patch(Polygon(_poly_disp(box_corners_bev(ego)), closed=True,
+                             facecolor="#00d050", alpha=0.45, edgecolor="#007a30",
+                             lw=2.8, zorder=10))
+        exw, eyw = ego["x"], ego["y"]
+        epx, epy = P(exw, eyw)
+        yaw = ego.get("yaw", 0.0)
+        al = max(ego.get("length", 4.0), 4.0)
+        adx, ady = P(exw + al * math.cos(yaw), eyw + al * math.sin(yaw))
+        ax.add_patch(FancyArrow(epx, epy, adx - epx, ady - epy, width=0.5,
+                                head_width=3.0, head_length=3.0,
+                                length_includes_head=True, color="#007a30", zorder=11))
+        ax.annotate("Ego", (epx, epy), textcoords="offset points", xytext=(6, 6),
+                    fontsize=12, fontweight="bold", color="#007a30", zorder=12)
+        ax.plot([], [], "-", color="#00b050", lw=2.8, label="Ego vehicle")
 
     ax.set_xlim(*disp_xlim)
     ax.set_ylim(*disp_ylim)
     ax.set_aspect("equal")
-    ax.set_xlabel(xlab)
-    ax.set_ylabel(ylab)
-    ax.set_title(FIGURE_TITLE, fontsize=14, fontweight="bold")
-    ax.grid(True, alpha=0.2, lw=0.5)
-    ax.legend(loc="upper right", fontsize=11, framealpha=0.95, markerscale=12)
+    if clean:
+        ax.axis("off")
+    else:
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(FIGURE_TITLE, fontsize=14, fontweight="bold")
+        ax.grid(True, alpha=0.2, lw=0.5)
+        ax.legend(loc="upper right", fontsize=11, framealpha=0.95, markerscale=12)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     tag = clip_name.split("_")[0]
     png = OUTPUT_DIR / f"cross_platform_bev_{tag}{suffix}.png"
     pdf = OUTPUT_DIR / f"cross_platform_bev_{tag}{suffix}.pdf"
-    fig.savefig(str(png), dpi=300, bbox_inches="tight")
-    fig.savefig(str(pdf), bbox_inches="tight")
+    pad = 0 if clean else 0.1
+    fig.savefig(str(png), dpi=300, bbox_inches="tight", pad_inches=pad)
+    fig.savefig(str(pdf), bbox_inches="tight", pad_inches=pad)
     plt.close(fig)
     return str(png)
 
@@ -556,6 +562,8 @@ def main():
                          "（让自车沿水平方向行驶）；范围/区域随之对调")
     ap.add_argument("--separate", action="store_true",
                     help="除合并图外，再分别输出只含路侧(_road)和只含车端(_car)的图")
+    ap.add_argument("--points-only", action="store_true",
+                    help="只保留雷达点：不画坐标轴/标题/图例/标注框，输出纯净点云图")
     ap.add_argument("--point-scale", type=float, default=1.5,
                     help="雷达点大小倍数（默认 1.5）")
     args = ap.parse_args()
