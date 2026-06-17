@@ -608,9 +608,11 @@ def main():
                     help="自车中心 y 下界（默认 -30）")
     ap.add_argument("--ego-y-max", type=float, default=10.0,
                     help="自车中心 y 上界（默认 10）")
-    ap.add_argument("--swap-xy", action="store_true",
+    ap.add_argument("--swap-xy", dest="swap_xy", action="store_true", default=True,
                     help="转置显示：世界 Y 画到水平轴、世界 X 画到竖直轴"
-                         "（让自车沿水平方向行驶）；范围/区域随之对调")
+                         "（让自车沿水平方向行驶）；范围/区域随之对调（默认开启）")
+    ap.add_argument("--no-swap-xy", dest="swap_xy", action="store_false",
+                    help="关闭轴转置，恢复 世界 X=水平、世界 Y=竖直")
     ap.add_argument("--separate", action="store_true",
                     help="除合并图外，再分别输出只含路侧(_road)和只含车端(_car)的图")
     ap.add_argument("--points-only", action="store_true",
