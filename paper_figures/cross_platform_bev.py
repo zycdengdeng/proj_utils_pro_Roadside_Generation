@@ -47,7 +47,7 @@ DEFAULT_XLIM = (-107.5, -2.5)
 DEFAULT_YLIM = (-125.0, 100.0)
 LIDAR_Z_EXTRA = 0.25  # 虚拟 LiDAR 在 bbox 顶部之上的偏移（ego_transform 约定）
 
-FIGURE_TITLE = "Cross-platform LiDAR and annotation alignment (THICV-R2V)"
+FIGURE_TITLE = "Vehicle–roadside LiDAR alignment (THICV-R2V)"
 
 
 # ==================================================================
@@ -488,18 +488,18 @@ def _render(clip_name, road_pts, car_pts, labels, ego, args,
 
     road_pts, car_pts = _crop(road_pts), _crop(car_pts)
     disp_xlim, disp_ylim = (ylim, xlim) if swap else (xlim, ylim)
-    xlab, ylab = ("Y (m)", "X (m)") if swap else ("X (m)", "Y (m)")
+    xlab, ylab = ("y (m)", "x (m)") if swap else ("x (m)", "y (m)")
     w, h = disp_xlim[1] - disp_xlim[0], disp_ylim[1] - disp_ylim[0]
     fig, ax = plt.subplots(figsize=(13.5, 13.5 * h / w + 0.6))
 
     if show_road:
         rx, ry = P(road_pts[:, 0], road_pts[:, 1])
         ax.scatter(rx, ry, s=0.25 * sc, c="#1f77b4", alpha=0.55,
-                   linewidths=0, rasterized=True, label="Roadside LiDAR (merged)")
+                   linewidths=0, rasterized=True, label="Roadside LiDAR")
     if show_car:
         cx, cy = P(car_pts[:, 0], car_pts[:, 1])
         ax.scatter(cx, cy, s=0.5 * sc, c="#d62728", alpha=0.85,
-                   linewidths=0, rasterized=True, label="Vehicle LiDAR (ego, projected)")
+                   linewidths=0, rasterized=True, label="Vehicle LiDAR")
 
     def _poly_disp(corners):
         return [P(px, py) for px, py in corners]
@@ -510,7 +510,7 @@ def _render(clip_name, road_pts, car_pts, labels, ego, args,
                 continue
             ax.add_patch(Polygon(_poly_disp(box_corners_bev(o)), closed=True,
                                  fill=False, edgecolor="#111111", lw=1.2, zorder=5))
-        ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
+        ax.plot([], [], "-", color="#111111", lw=1.2, label="3D annotations")
 
     # 自车框：绿色半透明填充 + 粗边 + 朝向箭头 + 标注（points-only 时不画）
     if not clean:
