@@ -167,8 +167,11 @@ python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJi
 - `--workers`：并行数。
 
 `--swap-xy`：转置显示，把世界 Y 画到水平轴、世界 X 画到竖直轴（让自车沿水平方向行驶），
-显示范围/区域/轴标签随之自动对调（`--xlim/--ylim` 始终按世界坐标给）。
-自车框用绿色半透明填充 + 朝向箭头 + “Ego” 标注，醒目可见。
+显示范围/区域/轴标签随之自动对调（`--xlim/--ylim` 始终按世界坐标给）。默认范围世界
+x 宽 70、y 宽 150（swap 后水平=长边 150）。自车框用绿色半透明填充 + 朝向箭头 + “Ego” 标注。
+
+`--separate`：除合并图外，再分别输出只含路侧(`_road`)和只含车端(`_car`)的图。
+`--point-scale`：雷达点大小倍数（默认 1.5）。
 
 会打印候选 clip 的 `score / gap(ms) / ego_x` 表，并选 gap 最小者。
 

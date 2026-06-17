@@ -41,9 +41,9 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_ROOT = "/mnt/car_road_data_TianJin"
 DEFAULT_CARID = "/mnt/car_road_data_TianJin/support_info/carid.json"
 
-# 展示范围
-DEFAULT_XLIM = (-130.0, 20.0)
-DEFAULT_YLIM = (-50.0, 25.0)
+# 展示范围（世界坐标）：x 宽 70、y 宽 150；配合 --swap-xy 后水平轴=世界Y(长150)、竖直=世界X(70)
+DEFAULT_XLIM = (-90.0, -20.0)
+DEFAULT_YLIM = (-87.5, 62.5)
 LIDAR_Z_EXTRA = 0.25  # 虚拟 LiDAR 在 bbox 顶部之上的偏移（ego_transform 约定）
 
 FIGURE_TITLE = "Cross-platform LiDAR and annotation alignment (THICV-R2V)"
@@ -394,7 +394,8 @@ def build_frame(args):
     return clip_name, road_pts, car_pts, labels, ego
 
 
-def draw(clip_name, road_pts, car_pts, labels, ego, args):
+def _render(clip_name, road_pts, car_pts, labels, ego, args,
+            show_road, show_car, show_annot, suffix):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -411,6 +412,7 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
         pass
 
     swap = args.swap_xy
+    sc = args.point_scale
     xlim, ylim = tuple(args.xlim), tuple(args.ylim)  # 始终是世界坐标
 
     def _crop(p):
@@ -420,46 +422,44 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
              (p[:, 1] >= ylim[0]) & (p[:, 1] <= ylim[1]))
         return p[m]
 
-    # 世界 (wx,wy) -> 画布 (px,py)。swap 时把世界 Y 画到水平、世界 X 画到竖直
-    def P(wx, wy):
+    def P(wx, wy):  # 世界 -> 画布；swap 时世界 Y 画到水平、世界 X 画到竖直
         return (wy, wx) if swap else (wx, wy)
 
     road_pts, car_pts = _crop(road_pts), _crop(car_pts)
     disp_xlim, disp_ylim = (ylim, xlim) if swap else (xlim, ylim)
     xlab, ylab = ("Y (m)", "X (m)") if swap else ("X (m)", "Y (m)")
-    w = disp_xlim[1] - disp_xlim[0]
-    h = disp_ylim[1] - disp_ylim[0]
+    w, h = disp_xlim[1] - disp_xlim[0], disp_ylim[1] - disp_ylim[0]
     fig, ax = plt.subplots(figsize=(13.5, 13.5 * h / w + 0.6))
 
-    rx, ry = P(road_pts[:, 0], road_pts[:, 1])
-    cx, cy = P(car_pts[:, 0], car_pts[:, 1])
-    ax.scatter(rx, ry, s=0.25, c="#1f77b4", alpha=0.55,
-               linewidths=0, rasterized=True, label="Roadside LiDAR (merged)")
-    ax.scatter(cx, cy, s=0.5, c="#d62728", alpha=0.85,
-               linewidths=0, rasterized=True, label="Vehicle LiDAR (ego, projected)")
+    if show_road:
+        rx, ry = P(road_pts[:, 0], road_pts[:, 1])
+        ax.scatter(rx, ry, s=0.25 * sc, c="#1f77b4", alpha=0.55,
+                   linewidths=0, rasterized=True, label="Roadside LiDAR (merged)")
+    if show_car:
+        cx, cy = P(car_pts[:, 0], car_pts[:, 1])
+        ax.scatter(cx, cy, s=0.5 * sc, c="#d62728", alpha=0.85,
+                   linewidths=0, rasterized=True, label="Vehicle LiDAR (ego, projected)")
 
     def _poly_disp(corners):
-        out = [P(px, py) for px, py in corners]
-        return out
+        return [P(px, py) for px, py in corners]
 
-    # 3D 标注框
-    for o in labels:
-        if o.get("id") == ego.get("id"):
-            continue
-        ax.add_patch(Polygon(_poly_disp(box_corners_bev(o)), closed=True, fill=False,
-                             edgecolor="#111111", lw=1.2, zorder=5))
-    ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
+    if show_annot:
+        for o in labels:
+            if o.get("id") == ego.get("id"):
+                continue
+            ax.add_patch(Polygon(_poly_disp(box_corners_bev(o)), closed=True,
+                                 fill=False, edgecolor="#111111", lw=1.2, zorder=5))
+        ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
 
     # 自车框：绿色半透明填充 + 粗边 + 朝向箭头 + 标注，画在最上层
-    ego_disp = _poly_disp(box_corners_bev(ego))
-    ax.add_patch(Polygon(ego_disp, closed=True, facecolor="#00d050", alpha=0.45,
-                         edgecolor="#007a30", lw=2.8, zorder=10))
+    ax.add_patch(Polygon(_poly_disp(box_corners_bev(ego)), closed=True,
+                         facecolor="#00d050", alpha=0.45, edgecolor="#007a30",
+                         lw=2.8, zorder=10))
     exw, eyw = ego["x"], ego["y"]
     epx, epy = P(exw, eyw)
     yaw = ego.get("yaw", 0.0)
     al = max(ego.get("length", 4.0), 4.0)
-    dxw, dyw = al * math.cos(yaw), al * math.sin(yaw)
-    adx, ady = P(exw + dxw, eyw + dyw)
+    adx, ady = P(exw + al * math.cos(yaw), eyw + al * math.sin(yaw))
     ax.add_patch(FancyArrow(epx, epy, adx - epx, ady - epy, width=0.5,
                             head_width=3.0, head_length=3.0, length_includes_head=True,
                             color="#007a30", zorder=11))
@@ -478,13 +478,28 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     tag = clip_name.split("_")[0]
-    png = OUTPUT_DIR / f"cross_platform_bev_{tag}.png"
-    pdf = OUTPUT_DIR / f"cross_platform_bev_{tag}.pdf"
+    png = OUTPUT_DIR / f"cross_platform_bev_{tag}{suffix}.png"
+    pdf = OUTPUT_DIR / f"cross_platform_bev_{tag}{suffix}.pdf"
     fig.savefig(str(png), dpi=300, bbox_inches="tight")
     fig.savefig(str(pdf), bbox_inches="tight")
     plt.close(fig)
-    print(f"[OK] 已保存:\n  {png}\n  {pdf}")
-    return str(png), str(pdf)
+    return str(png)
+
+
+def draw(clip_name, road_pts, car_pts, labels, ego, args):
+    outs = [_render(clip_name, road_pts, car_pts, labels, ego, args,
+                    show_road=True, show_car=True, show_annot=True, suffix="")]
+    if args.separate:
+        outs.append(_render(clip_name, road_pts, car_pts, labels, ego, args,
+                            show_road=True, show_car=False, show_annot=True,
+                            suffix="_road"))
+        outs.append(_render(clip_name, road_pts, car_pts, labels, ego, args,
+                            show_road=False, show_car=True, show_annot=False,
+                            suffix="_car"))
+    print("[OK] 已保存:")
+    for p in outs:
+        print(f"  {p}")
+    return outs
 
 
 def main():
@@ -523,6 +538,10 @@ def main():
     ap.add_argument("--swap-xy", action="store_true",
                     help="转置显示：世界 Y 画到水平轴、世界 X 画到竖直轴"
                          "（让自车沿水平方向行驶）；范围/区域随之对调")
+    ap.add_argument("--separate", action="store_true",
+                    help="除合并图外，再分别输出只含路侧(_road)和只含车端(_car)的图")
+    ap.add_argument("--point-scale", type=float, default=1.5,
+                    help="雷达点大小倍数（默认 1.5）")
     args = ap.parse_args()
 
     if args.scan_all:
