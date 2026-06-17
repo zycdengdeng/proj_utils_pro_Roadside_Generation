@@ -606,7 +606,6 @@ def draw_figure(scene_name, region, region_src, metrics, tag,
     rows = [
         ("Duration (s)", f"{metrics['duration']:.0f}"),
         ("Vehicles annotated", f"{metrics['n_total']}"),
-        ("Flow rate (veh/min)", f"{metrics['throughput']:.1f}"),
         ("Max. vehicles in intersection", f"{metrics['peak_concurrent']}"),
         ("Average vehicles in intersection", f"{metrics['mean_concurrent']:.1f}"),
         ("Directional diversity", f"{metrics['dir_entropy']:.2f}"),
