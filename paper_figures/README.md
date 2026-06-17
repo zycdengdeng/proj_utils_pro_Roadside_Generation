@@ -162,8 +162,13 @@ python cross_platform_bev.py --clip 002 --dataset-root /mnt/car_road_data_TianJi
 `--scan-all`：并行遍历 clip，**优先在复杂度高的 clip 中、且自车 x 在范围内、挑时间差最小**的渲染：
 - `--complexity-csv`：复杂度排名 CSV（`traffic_complexity_figure.py --scan` 产出），默认读 `output/complexity_ranking.csv`；
 - `--top-complex N`：只在复杂度前 N 的 clip 中搜（默认 10，`<=0` 不限）；
-- `--ego-x-min/--ego-x-max`：所选帧自车中心 x 的范围（默认 -100 ~ -20）；
+- `--ego-x-min/--ego-x-max`：所选帧自车中心 x 范围（默认 -100 ~ -20）；
+- `--ego-y-min/--ego-y-max`：自车中心 y 范围（默认 -30 ~ 10）；
 - `--workers`：并行数。
+
+`--swap-xy`：转置显示，把世界 Y 画到水平轴、世界 X 画到竖直轴（让自车沿水平方向行驶），
+显示范围/区域/轴标签随之自动对调（`--xlim/--ylim` 始终按世界坐标给）。
+自车框用绿色半透明填充 + 朝向箭头 + “Ego” 标注，醒目可见。
 
 会打印候选 clip 的 `score / gap(ms) / ego_x` 表，并选 gap 最小者。
 

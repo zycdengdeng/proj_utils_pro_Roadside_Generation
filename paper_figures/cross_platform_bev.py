@@ -171,9 +171,17 @@ def nearest(ts_list, target_ms):
     return min(ts_list, key=lambda kv: abs(kv[0] - target_ms)) if ts_list else None
 
 
+def _ego_in_range(ego, ego_x_range, ego_y_range):
+    if ego_x_range and not (ego_x_range[0] <= ego["x"] <= ego_x_range[1]):
+        return False
+    if ego_y_range and not (ego_y_range[0] <= ego["y"] <= ego_y_range[1]):
+        return False
+    return True
+
+
 def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                 ego_x_range=None):
-    """若该路侧帧有 pcd+label、含自车 id（且自车 x 在指定范围内），返回配对，否则 None。"""
+                 ego_x_range=None, ego_y_range=None):
+    """若该路侧帧有 pcd+label、含自车 id（且自车 x/y 在指定范围内），返回配对，否则 None。"""
     road_pcd = os.path.join(road_pcd_dir, f"{road_ts}.pcd")
     lab = os.path.join(road_lab_dir, f"{road_ts}.json")
     if not (os.path.exists(road_pcd) and os.path.exists(lab)):
@@ -182,7 +190,7 @@ def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
     ego = next((o for o in objs if o.get("id") == ego_id), None)
     if ego is None:
         return None
-    if ego_x_range and not (ego_x_range[0] <= ego["x"] <= ego_x_range[1]):
+    if not _ego_in_range(ego, ego_x_range, ego_y_range):
         return None
     car_ts, car_pcd = nearest(car_list, road_ts)
     return {"road_ts": road_ts, "road_pcd": road_pcd, "labels": objs, "ego": ego,
@@ -190,11 +198,11 @@ def _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
 
 
 def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                 visualize_ts, ego_x_range=None):
+                 visualize_ts, ego_x_range=None, ego_y_range=None):
     """选路侧/车端配对帧。
 
-    --road-time: 用指定帧（不加自车 x 约束）；--anchor visualize: 锚定 visualize_roadtime；
-    默认 (best): 遍历所有含自车 id（且自车 x 在范围内）的路侧帧，选时间差最小的配对。
+    --road-time: 用指定帧（不加自车约束）；--anchor visualize: 锚定 visualize_roadtime；
+    默认 (best): 遍历所有含自车 id（且自车 x/y 在范围内）的路侧帧，选时间差最小的配对。
     """
     if args.road_time:
         f = _try_road_ts(int(args.road_time), road_pcd_dir, road_lab_dir,
@@ -206,14 +214,14 @@ def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
     if args.anchor == "visualize" and visualize_ts:
         for road_ts, _ in sorted(road_list, key=lambda kv: abs(kv[0] - visualize_ts)):
             f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                             ego_x_range)
+                             ego_x_range, ego_y_range)
             if f:
                 return f
 
     best = None
     for road_ts, _ in road_list:
         f = _try_road_ts(road_ts, road_pcd_dir, road_lab_dir, car_list, ego_id,
-                         ego_x_range)
+                         ego_x_range, ego_y_range)
         if f and (best is None or f["gap"] < best["gap"]):
             best = f
             if best["gap"] == 0:
@@ -227,8 +235,8 @@ def choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list, ego_id,
 # ==================================================================
 # 跨 clip 搜索：找全局时间差最小的配对
 # ==================================================================
-def clip_best_gap(clip_dir, carid_json, ego_x_range=None):
-    """单 clip 的最小车端/路侧时间差配对（自车 x 须在范围内）。返回 dict 或 None。"""
+def clip_best_gap(clip_dir, carid_json, ego_x_range=None, ego_y_range=None):
+    """单 clip 的最小车端/路侧时间差配对（自车 x/y 须在范围内）。返回 dict 或 None。"""
     import bisect
     name = os.path.basename(os.path.normpath(clip_dir))
     road_pcd_dir = os.path.join(clip_dir, "road", "lidar", "merged_pcd")
@@ -265,14 +273,14 @@ def clip_best_gap(clip_dir, carid_json, ego_x_range=None):
         ego = next((o for o in objs if o.get("id") == ego_id), None)
         if ego is None:
             continue
-        if ego_x_range and not (ego_x_range[0] <= ego["x"] <= ego_x_range[1]):
+        if not _ego_in_range(ego, ego_x_range, ego_y_range):
             continue
         i = bisect.bisect_left(car_ts, rts)
         cts = min((car_ts[j] for j in (i - 1, i, i + 1) if 0 <= j < len(car_ts)),
                   key=lambda c: abs(c - rts))
         return {"clip": name, "clip_dir": clip_dir, "gap": gap,
                 "road_ts": rts, "car_ts": cts, "ego_id": ego_id,
-                "ego_x": round(ego["x"], 1)}
+                "ego_x": round(ego["x"], 1), "ego_y": round(ego["y"], 1)}
     return None
 
 
@@ -297,6 +305,7 @@ def scan_all_clips(args):
     """优先在高复杂度 clip 中、自车 x 在范围内、挑时间差最小的配对。"""
     import concurrent.futures as cf
     ego_x_range = (args.ego_x_min, args.ego_x_max)
+    ego_y_range = (args.ego_y_min, args.ego_y_max)
     clip_dirs = [os.path.abspath(p) for p in sorted(glob.glob(os.path.join(args.dataset_root, "*")))
                  if os.path.isdir(os.path.join(p, "road", "lidar", "merged_pcd"))]
     if not clip_dirs:
@@ -312,12 +321,13 @@ def scan_all_clips(args):
             print(f"[WARN] 复杂度 CSV 的 clip 名与数据集对不上，改在全部 clip 中搜索")
     else:
         print(f"[WARN] 未找到复杂度 CSV（{args.complexity_csv}），在全部 clip 中搜索")
-    print(f"[INFO] 约束: 自车 x ∈ [{args.ego_x_min}, {args.ego_x_max}]；共 {len(clip_dirs)} 个候选")
+    print(f"[INFO] 约束: 自车 x ∈ [{args.ego_x_min}, {args.ego_x_max}], "
+          f"y ∈ [{args.ego_y_min}, {args.ego_y_max}]；共 {len(clip_dirs)} 个候选")
 
     workers = args.workers or min(64, os.cpu_count() or 8)
     results = []
     with cf.ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(clip_best_gap, d, args.carid_json, ego_x_range): d
+        futs = {ex.submit(clip_best_gap, d, args.carid_json, ego_x_range, ego_y_range): d
                 for d in clip_dirs}
         for fut in cf.as_completed(futs):
             r = fut.result()
@@ -325,16 +335,18 @@ def scan_all_clips(args):
                 r["score"] = scores.get(r["clip"], 0.0)
                 results.append(r)
     if not results:
-        raise SystemExit("候选 clip 里没有满足"
-                         "(含自车 id + 自车 x 在范围内)的帧；可放宽 --ego-x-min/max")
+        raise SystemExit("候选 clip 里没有满足(含自车 id + 自车 x/y 在范围内)的帧；"
+                         "可放宽 --ego-x-min/max 或 --ego-y-min/max")
     results.sort(key=lambda r: r["gap"])
-    print(f"\n{'='*70}\n候选 clip：自车 x 在范围内的最小时间差（按 gap 升序）\n{'='*70}")
-    print(f"{'#':>3}  {'clip':<34}{'score':>6}{'gap(ms)':>8}{'ego_x':>8}")
+    print(f"\n{'='*76}\n候选 clip：自车 x/y 在范围内的最小时间差（按 gap 升序）\n{'='*76}")
+    print(f"{'#':>3}  {'clip':<34}{'score':>6}{'gap(ms)':>8}{'ego_x':>8}{'ego_y':>8}")
     for i, r in enumerate(results[:15], 1):
-        print(f"{i:>3}  {r['clip']:<34}{r['score']:>6.1f}{r['gap']:>8}{r['ego_x']:>8}")
+        print(f"{i:>3}  {r['clip']:<34}{r['score']:>6.1f}{r['gap']:>8}"
+              f"{r['ego_x']:>8}{r['ego_y']:>8}")
     best = results[0]
     print(f"\n[INFO] 选中: {best['clip']} (score={best['score']:.1f}) "
-          f"gap={best['gap']} ms  road_ts={best['road_ts']} ego_x={best['ego_x']}")
+          f"gap={best['gap']} ms  road_ts={best['road_ts']} "
+          f"ego=({best['ego_x']},{best['ego_y']})")
     return best
 
 
@@ -363,8 +375,9 @@ def build_frame(args):
 
     visualize_ts = int(entry.get("visualize_roadtime", 0) or 0)
     ego_x_range = (args.ego_x_min, args.ego_x_max)
+    ego_y_range = (args.ego_y_min, args.ego_y_max)
     frame = choose_frame(args, road_list, road_pcd_dir, road_lab_dir, car_list,
-                         ego_id, visualize_ts, ego_x_range)
+                         ego_id, visualize_ts, ego_x_range, ego_y_range)
     if frame is None:
         raise SystemExit(f"找不到含自车 id={ego_id} 且有点云的路侧帧")
     road_ts, car_ts = frame["road_ts"], frame["car_ts"]
@@ -385,7 +398,7 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Polygon, FancyArrow
 
     try:
         import matplotlib.font_manager as fm
@@ -397,10 +410,8 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
     except Exception:
         pass
 
-    xlim, ylim = tuple(args.xlim), tuple(args.ylim)
-    w = xlim[1] - xlim[0]
-    h = ylim[1] - ylim[0]
-    fig, ax = plt.subplots(figsize=(13.5, 13.5 * h / w + 0.6))
+    swap = args.swap_xy
+    xlim, ylim = tuple(args.xlim), tuple(args.ylim)  # 始终是世界坐标
 
     def _crop(p):
         if len(p) == 0:
@@ -409,38 +420,61 @@ def draw(clip_name, road_pts, car_pts, labels, ego, args):
              (p[:, 1] >= ylim[0]) & (p[:, 1] <= ylim[1]))
         return p[m]
 
-    road_pts, car_pts = _crop(road_pts), _crop(car_pts)
+    # 世界 (wx,wy) -> 画布 (px,py)。swap 时把世界 Y 画到水平、世界 X 画到竖直
+    def P(wx, wy):
+        return (wy, wx) if swap else (wx, wy)
 
-    ax.scatter(road_pts[:, 0], road_pts[:, 1], s=0.25, c="#1f77b4", alpha=0.55,
+    road_pts, car_pts = _crop(road_pts), _crop(car_pts)
+    disp_xlim, disp_ylim = (ylim, xlim) if swap else (xlim, ylim)
+    xlab, ylab = ("Y (m)", "X (m)") if swap else ("X (m)", "Y (m)")
+    w = disp_xlim[1] - disp_xlim[0]
+    h = disp_ylim[1] - disp_ylim[0]
+    fig, ax = plt.subplots(figsize=(13.5, 13.5 * h / w + 0.6))
+
+    rx, ry = P(road_pts[:, 0], road_pts[:, 1])
+    cx, cy = P(car_pts[:, 0], car_pts[:, 1])
+    ax.scatter(rx, ry, s=0.25, c="#1f77b4", alpha=0.55,
                linewidths=0, rasterized=True, label="Roadside LiDAR (merged)")
-    ax.scatter(car_pts[:, 0], car_pts[:, 1], s=0.5, c="#d62728", alpha=0.85,
+    ax.scatter(cx, cy, s=0.5, c="#d62728", alpha=0.85,
                linewidths=0, rasterized=True, label="Vehicle LiDAR (ego, projected)")
+
+    def _poly_disp(corners):
+        out = [P(px, py) for px, py in corners]
+        return out
 
     # 3D 标注框
     for o in labels:
         if o.get("id") == ego.get("id"):
             continue
-        poly = box_corners_bev(o)
-        ax.add_patch(Polygon(poly, closed=True, fill=False, edgecolor="#111111",
-                             lw=1.2, zorder=5))
+        ax.add_patch(Polygon(_poly_disp(box_corners_bev(o)), closed=True, fill=False,
+                             edgecolor="#111111", lw=1.2, zorder=5))
     ax.plot([], [], "-", color="#111111", lw=1.2, label="Roadside 3D annotations")
 
-    # 自车框（绿色，避开与车端红点撞色）
-    ego_poly = box_corners_bev(ego)
-    ax.add_patch(Polygon(ego_poly, closed=True, fill=False, edgecolor="#00b050",
-                         lw=2.4, zorder=6))
-    ax.plot([], [], "-", color="#00b050", lw=2.4, label="Ego vehicle")
+    # 自车框：绿色半透明填充 + 粗边 + 朝向箭头 + 标注，画在最上层
+    ego_disp = _poly_disp(box_corners_bev(ego))
+    ax.add_patch(Polygon(ego_disp, closed=True, facecolor="#00d050", alpha=0.45,
+                         edgecolor="#007a30", lw=2.8, zorder=10))
+    exw, eyw = ego["x"], ego["y"]
+    epx, epy = P(exw, eyw)
+    yaw = ego.get("yaw", 0.0)
+    al = max(ego.get("length", 4.0), 4.0)
+    dxw, dyw = al * math.cos(yaw), al * math.sin(yaw)
+    adx, ady = P(exw + dxw, eyw + dyw)
+    ax.add_patch(FancyArrow(epx, epy, adx - epx, ady - epy, width=0.5,
+                            head_width=3.0, head_length=3.0, length_includes_head=True,
+                            color="#007a30", zorder=11))
+    ax.annotate("Ego", (epx, epy), textcoords="offset points", xytext=(6, 6),
+                fontsize=12, fontweight="bold", color="#007a30", zorder=12)
+    ax.plot([], [], "-", color="#00b050", lw=2.8, label="Ego vehicle")
 
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    ax.set_xlim(*disp_xlim)
+    ax.set_ylim(*disp_ylim)
     ax.set_aspect("equal")
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
     ax.set_title(FIGURE_TITLE, fontsize=14, fontweight="bold")
     ax.grid(True, alpha=0.2, lw=0.5)
-    leg = ax.legend(loc="upper right", fontsize=11, framealpha=0.95, markerscale=12)
-    for h_ in leg.legend_handles:
-        pass
+    ax.legend(loc="upper right", fontsize=11, framealpha=0.95, markerscale=12)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     tag = clip_name.split("_")[0]
@@ -482,6 +516,13 @@ def main():
                     help="自车中心 x 下界（默认 -100）")
     ap.add_argument("--ego-x-max", type=float, default=-20.0,
                     help="自车中心 x 上界（默认 -20）")
+    ap.add_argument("--ego-y-min", type=float, default=-30.0,
+                    help="自车中心 y 下界（默认 -30）")
+    ap.add_argument("--ego-y-max", type=float, default=10.0,
+                    help="自车中心 y 上界（默认 10）")
+    ap.add_argument("--swap-xy", action="store_true",
+                    help="转置显示：世界 Y 画到水平轴、世界 X 画到竖直轴"
+                         "（让自车沿水平方向行驶）；范围/区域随之对调")
     args = ap.parse_args()
 
     if args.scan_all:
